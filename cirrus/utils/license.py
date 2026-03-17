@@ -74,6 +74,35 @@ class TenantLicenseProfile:
     # ------------------------------------------------------------------ #
 
     @classmethod
+    def from_subscribed_skus(cls, skus: list[dict]) -> "TenantLicenseProfile":
+        """
+        Build a profile from an already-fetched /subscribedSkus list.
+
+        Use this in the compliance layer where SKUs are fetched as part of
+        the PolicyContext — avoids a redundant API call.
+        """
+        active_ids: set[str] = set()
+        for sku in skus:
+            if sku.get("capabilityStatus", "").lower() != "enabled":
+                continue
+            for plan in sku.get("servicePlans", []):
+                if plan.get("provisioningStatus", "").lower() == "success":
+                    active_ids.add(plan.get("servicePlanId", ""))
+
+        p2 = _PLAN_ID["entra_p2"] in active_ids
+        exchange = (
+            _PLAN_ID["exchange_p1"] in active_ids
+            or _PLAN_ID["exchange_p2"] in active_ids
+        )
+
+        return cls(
+            has_entra_p1=(p2 or _PLAN_ID["entra_p1"] in active_ids),
+            has_entra_p2=p2,
+            has_exchange=exchange,
+            has_advanced_auditing=(_PLAN_ID["advanced_auditing"] in active_ids),
+        )
+
+    @classmethod
     def fetch(cls, session: requests.Session) -> "TenantLicenseProfile":
         """
         Query /subscribedSkus and build the profile.
@@ -93,26 +122,7 @@ class TenantLicenseProfile:
         except Exception:
             return cls._permissive()
 
-        active_ids: set[str] = set()
-        for sku in data.get("value", []):
-            if sku.get("capabilityStatus", "").lower() != "enabled":
-                continue
-            for plan in sku.get("servicePlans", []):
-                if plan.get("provisioningStatus", "").lower() == "success":
-                    active_ids.add(plan.get("servicePlanId", ""))
-
-        p2 = _PLAN_ID["entra_p2"] in active_ids
-        exchange = (
-            _PLAN_ID["exchange_p1"] in active_ids
-            or _PLAN_ID["exchange_p2"] in active_ids
-        )
-
-        return cls(
-            has_entra_p1=(p2 or _PLAN_ID["entra_p1"] in active_ids),
-            has_entra_p2=p2,
-            has_exchange=exchange,
-            has_advanced_auditing=(_PLAN_ID["advanced_auditing"] in active_ids),
-        )
+        return cls.from_subscribed_skus(data.get("value", []))
 
     @classmethod
     def _permissive(cls) -> "TenantLicenseProfile":

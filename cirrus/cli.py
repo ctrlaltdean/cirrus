@@ -25,7 +25,9 @@ Global options available on every command:
 
 from __future__ import annotations
 
+import json
 import sys
+import time as _time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Optional
@@ -81,6 +83,59 @@ console = Console()
 DEFAULT_OUTPUT_DIR = Path("investigations")
 
 # ---------------------------------------------------------------------------
+# Silent update check (runs at banner display, rate-limited to once/24 h)
+# ---------------------------------------------------------------------------
+
+_UPDATE_CACHE = Path.home() / ".cirrus_update_check.json"
+_UPDATE_CACHE_TTL = 86_400  # 24 hours in seconds
+
+
+def _silent_update_check() -> None:
+    """
+    Non-blocking update notification.
+
+    Checks the GitHub Releases API at most once per 24 hours (result cached
+    in ~/.cirrus_update_check.json).  Uses a 3-second timeout so it never
+    blocks a workflow.  All errors are silently ignored.
+    """
+    try:
+        now = _time.time()
+        cached: dict | None = None
+
+        if _UPDATE_CACHE.exists():
+            try:
+                data = json.loads(_UPDATE_CACHE.read_text(encoding="utf-8"))
+                if now - data.get("checked_at", 0) < _UPDATE_CACHE_TTL:
+                    cached = data
+            except Exception:
+                pass
+
+        if cached is None:
+            info = check_for_update(timeout=3)
+            if not info.error:
+                cache_data = {
+                    "checked_at": now,
+                    "latest_version": info.latest_version,
+                    "update_available": info.update_available,
+                }
+                try:
+                    _UPDATE_CACHE.write_text(
+                        json.dumps(cache_data), encoding="utf-8"
+                    )
+                except Exception:
+                    pass
+                cached = cache_data
+
+        if cached and cached.get("update_available"):
+            latest = cached.get("latest_version", "?")
+            console.print(
+                f"  [yellow]↑ Update available: v{latest}[/yellow]  "
+                "[dim]Run [bold]cirrus update[/bold] to install.[/dim]"
+            )
+    except Exception:
+        pass  # never surface update-check failures to the user
+
+# ---------------------------------------------------------------------------
 # Shared option types
 # ---------------------------------------------------------------------------
 
@@ -102,7 +157,7 @@ OptionalTenantOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _banner() -> None:
+def _banner(skip_update_check: bool = False) -> None:
     console.print(
         Panel.fit(
             f"[bold cyan]CIRRUS[/bold cyan] [dim]v{__version__}[/dim]\n"
@@ -110,6 +165,8 @@ def _banner() -> None:
             border_style="bright_blue",
         )
     )
+    if not skip_update_check:
+        _silent_update_check()
 
 
 def _resolve_users(
@@ -822,7 +879,7 @@ def update(
         cirrus update
         cirrus update --check
     """
-    _banner()
+    _banner(skip_update_check=True)
 
     console.print("[bold]Checking for updates...[/bold]")
     info = check_for_update()

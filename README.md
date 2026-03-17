@@ -40,12 +40,14 @@ CIRRUS is a command-line tool for collecting forensic artifacts from Microsoft 3
 |---|---|
 | **BEC Workflow** | Targeted 10-step collection for Business Email Compromise investigations |
 | **Full Tenant Sweep** | Complete collection across all supported data sources |
-| **CIS Compliance Audit** | 31 checks against CIS M365 & Entra ID Benchmarks with wizard UI |
+| **CIS Compliance Audit** | 34 checks against CIS M365 & Entra ID Benchmarks with wizard UI |
+| **License-Aware Collection** | Detects tenant license tier (P1/P2/E5) and gracefully skips unsupported endpoints |
 | **Multi-Tenant** | Authenticate to and collect from multiple client tenants independently |
 | **Flexible Targeting** | Single user, multiple users, file list, or entire tenant |
 | **Chain of Custody** | Tamper-evident SHA-256 hash chain audit log per case |
 | **Dual Output** | Every collector writes JSON + CSV |
 | **IOC Flagging** | Collectors auto-annotate records with `_iocFlags` for quick triage |
+| **Auto-Update** | Checks for new releases in the background; update in one command |
 | **Standalone Executable** | Single file download — no Python required on analyst machines |
 | **Cross-Platform** | Windows, macOS, and Linux |
 
@@ -157,15 +159,23 @@ Targeted collection for a known (or suspected) compromised account. Collects in 
 
 **What it collects:**
 1. Target user details
-2. Sign-in logs (last N days)
-3. Entra directory audit logs (password resets, MFA changes, role assignments)
-4. Risky user scores (Identity Protection)
-5. Risky sign-in events
+2. Sign-in logs (last N days) — *requires Entra ID P1*
+3. Entra directory audit logs (password resets, MFA changes, role assignments) — *requires Entra ID P1*
+4. Risky user scores (Identity Protection) — *requires Entra ID P2*
+5. Risky sign-in events — *requires Entra ID P2*
 6. MFA / authentication methods (look for attacker-added methods)
 7. Mailbox inbox rules (hide/forward/delete rules)
 8. Mailbox forwarding settings (SMTP forwarding to external address)
 9. OAuth app grants (malicious app consent)
-10. Unified Audit Log — `MailItemsAccessed`, forwarding rules, file downloads
+10. Unified Audit Log — `MailItemsAccessed`, forwarding rules, file downloads — *requires M365 Advanced Auditing (E5 or Purview add-on)*
+
+**License-aware collection:** Before running, CIRRUS checks the tenant's license tier and shows which collectors will run. Collectors for unlicensed features are gracefully skipped with a clear explanation rather than failing with an API error.
+
+```
+Tenant license profile:  Entra ID P1 ✓   Entra ID P2 ✗   M365 Advanced Auditing (UAL) ✗
+  ↳ Entra ID P2 not found — risky_users, risky_signins will be skipped
+  ↳ M365 Advanced Auditing (UAL) not found — unified_audit_log will be skipped
+```
 
 ```bash
 # Single user — most common
@@ -256,7 +266,7 @@ Case name (leave blank for auto-generated):
 Ready to run. Proceed? [Y/n]:
 ```
 
-> **Note:** Before authenticating, CIRRUS checks for optional PowerShell module dependencies (`ExchangeOnlineManagement`, `MicrosoftTeams`, `Microsoft.Online.SharePoint.PowerShell`) and shows their status. Missing modules fall back to manual instructions — they are not required to run the audit.
+> **Note:** Before running checks, CIRRUS displays the tenant's license tier (Entra ID P1/P2, M365 Advanced Auditing) and optional PowerShell module status. Missing licenses cause certain checks to show contextual notes explaining the gap rather than unexplained FAILs. Missing modules fall back to step-by-step manual instructions.
 
 #### Direct Flags (Scripted / Automated)
 
@@ -290,7 +300,7 @@ cirrus run audit --tenant contoso.com --benchmark all --level 1 --no-save
   Summary:  14 PASS  7 FAIL  3 WARN  14 MANUAL  0 ERROR
 ```
 
-> **Checks total 34.** The wizard prompt shows the actual count for the selected benchmark and level combination.
+> The wizard prompt shows the actual count for the selected benchmark and level combination.
 
 #### CIS Controls Coverage
 
@@ -310,7 +320,13 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 
 ### Updating CIRRUS
 
-CIRRUS can update itself from GitHub Releases:
+CIRRUS automatically checks for new releases in the background on every run (at most once per 24 hours, 3-second timeout). If a newer version is available, a notification appears below the banner:
+
+```
+  ↑ Update available: v0.4.1  Run cirrus update to install.
+```
+
+To update:
 
 ```bash
 # Check if a new version is available (no download)

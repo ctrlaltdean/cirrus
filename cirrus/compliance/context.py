@@ -14,6 +14,7 @@ import requests
 from cirrus.collectors.base import GRAPH_BASE, GRAPH_BETA, GraphCollector
 from cirrus.utils.dns_checker import DNS_AVAILABLE, DomainDnsResults, check_all_dns
 from cirrus.utils.exchange_ps import ExchangePSResults, run_exchange_batch
+from cirrus.utils.license import TenantLicenseProfile
 from cirrus.utils.teams_ps import TeamsPSResults, run_teams_batch
 from cirrus.utils.sharepoint_ps import SharePointPSResults, derive_spo_admin_url, run_sharepoint_batch
 
@@ -58,6 +59,9 @@ class PolicyContext:
 
     # Tenant prefix (e.g. "contoso" from "contoso.onmicrosoft.com") for SPO URL
     tenant_prefix: str = ""
+
+    # License profile derived from subscribed_skus — available after build()
+    license_profile: TenantLicenseProfile | None = None
 
     # Errors encountered during pre-fetch (non-fatal)
     fetch_errors: dict[str, str] = field(default_factory=dict)
@@ -189,6 +193,7 @@ class ContextBuilder(GraphCollector):
                 f"{GRAPH_BASE}/subscribedSkus",
                 params={"$select": "skuPartNumber,skuId,capabilityStatus,servicePlans"},
             )
+            ctx.license_profile = TenantLicenseProfile.from_subscribed_skus(ctx.subscribed_skus)
         except Exception as e:
             ctx.fetch_errors["subscribed_skus"] = str(e)
 

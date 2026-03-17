@@ -51,10 +51,14 @@ def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
 
 
-def check_for_update() -> UpdateInfo:
+def check_for_update(timeout: int = 10) -> UpdateInfo:
     """
     Query the GitHub Releases API.
     Returns UpdateInfo regardless of whether an update is available.
+
+    Args:
+        timeout: Request timeout in seconds (default 10).
+                 Pass a smaller value (e.g. 3) for background checks.
     """
     system     = platform.system()
     asset_name = _PLATFORM_ASSET.get(system)
@@ -62,7 +66,7 @@ def check_for_update() -> UpdateInfo:
     try:
         resp = requests.get(
             RELEASES_API,
-            timeout=10,
+            timeout=timeout,
             headers={"Accept": "application/vnd.github+json"},
         )
         resp.raise_for_status()

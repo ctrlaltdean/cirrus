@@ -20,10 +20,30 @@ from cirrus.compliance.checks.identity import IDENTITY_CHECKS
 from cirrus.compliance.checks.logging import LOGGING_CHECKS
 from cirrus.compliance.checks.teams_sharepoint import SHAREPOINT_CHECKS, TEAMS_CHECKS
 from cirrus.compliance.context import ContextBuilder, PolicyContext
+from cirrus.utils.license import TenantLicenseProfile
 
 Benchmark = Literal["cis-m365", "cis-entra", "all"]
 
 console = Console()
+
+
+def _render_license_banner(profile: TenantLicenseProfile) -> None:
+    """Print a compact license tier summary inline with the compliance output."""
+    parts: list[str] = []
+    for label, available, skipped in profile.summary_rows():
+        if available:
+            parts.append(f"{label} [green]✓[/green]")
+        else:
+            parts.append(f"{label} [red]✗[/red]")
+
+    console.print("  [bold]Tenant licenses:[/bold]  " + "   ".join(parts))
+
+    for label, available, skipped in profile.summary_rows():
+        if not available and skipped:
+            console.print(
+                f"  [dim]↳ {label} not licensed — some checks may show expected FAILs[/dim]"
+            )
+    console.print()
 
 ALL_CHECKS: list[type[BaseCheck]] = (
     IDENTITY_CHECKS
@@ -97,6 +117,10 @@ class ComplianceRunner:
         if ctx.fetch_errors:
             for key, err in ctx.fetch_errors.items():
                 console.print(f"  [yellow]⚠ Could not fetch {key}:[/yellow] {err}")
+
+        # License banner — uses already-fetched SKU data, no extra API call
+        if ctx.license_profile:
+            _render_license_banner(ctx.license_profile)
 
         # Report Exchange PS and DNS status
         if ctx.exchange_ps and ctx.exchange_ps.available:

@@ -69,6 +69,21 @@ def _security_defaults_enabled(ctx: PolicyContext) -> bool:
     return ctx.security_defaults.get("isEnabled", False)
 
 
+def _p1_missing_note(ctx: PolicyContext) -> str:
+    """
+    Return a note string when the tenant appears to lack Entra ID P1.
+    Empty string when P1 is present or the license profile is unavailable.
+    """
+    lp = ctx.license_profile
+    if lp is not None and not lp.has_entra_p1:
+        return (
+            "Note: Conditional Access policies require Entra ID P1 or higher. "
+            "This tenant does not appear to have P1 licensed, which explains why "
+            "no CA policies were found. Upgrade to Entra ID P1 to enable CA policies."
+        )
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # 1.1 — Security Defaults & Modern Authentication
 # ---------------------------------------------------------------------------
@@ -261,6 +276,7 @@ class CheckMFAAllUsers(BaseCheck):
             CheckStatus.FAIL,
             expected="CA policy requiring MFA for all users",
             actual="No enabled CA policy found that requires MFA for all users",
+            notes=_p1_missing_note(ctx),
         )
 
 
@@ -308,6 +324,7 @@ class CheckMFAAdmins(BaseCheck):
             CheckStatus.FAIL,
             expected="CA policy requiring MFA for admin roles",
             actual="No enabled CA policy found that requires MFA for admin roles",
+            notes=_p1_missing_note(ctx),
         )
 
 
@@ -361,6 +378,7 @@ class CheckMFAAzureManagement(BaseCheck):
             CheckStatus.FAIL,
             expected="CA policy requiring MFA for Azure Management app",
             actual="No CA policy found requiring MFA for Azure Management",
+            notes=_p1_missing_note(ctx),
         )
 
 
@@ -525,6 +543,7 @@ class CheckBlockLegacyAuth(BaseCheck):
             CheckStatus.FAIL,
             expected="CA policy blocking legacy authentication",
             actual="No CA policy found that blocks legacy authentication protocols",
+            notes=_p1_missing_note(ctx),
         )
 
 
