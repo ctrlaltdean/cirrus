@@ -1,11 +1,8 @@
-# PyInstaller spec file for CIRRUS
+# PyInstaller spec file for CIRRUS — compatible with PyInstaller 6.x
 # Build: pyinstaller cirrus.spec
-# Output: dist/cirrus (or dist/cirrus.exe on Windows)
+# Output: dist/cirrus  (or dist/cirrus.exe on Windows)
 
-import sys
 from pathlib import Path
-
-block_cipher = None
 
 a = Analysis(
     ["cirrus/cli.py"],
@@ -18,7 +15,7 @@ a = Analysis(
         "msal.application",
         "msal.authority",
         "msal.token_cache",
-        # Requests/urllib3
+        # Requests / urllib3 / certs
         "requests",
         "urllib3",
         "certifi",
@@ -30,14 +27,17 @@ a = Analysis(
         "rich.table",
         "rich.progress",
         "rich.prompt",
+        "rich.text",
         # Pydantic
         "pydantic",
-        # All cirrus modules
+        # cirrus — core
         "cirrus",
         "cirrus.auth.authenticator",
         "cirrus.audit.logger",
         "cirrus.output.case",
         "cirrus.output.writer",
+        "cirrus.utils.helpers",
+        # cirrus — collectors
         "cirrus.collectors.base",
         "cirrus.collectors.signin_logs",
         "cirrus.collectors.audit_logs",
@@ -50,10 +50,22 @@ a = Analysis(
         "cirrus.collectors.risky_users",
         "cirrus.collectors.users",
         "cirrus.collectors.service_principals",
+        # cirrus — workflows
         "cirrus.workflows.base",
         "cirrus.workflows.bec",
         "cirrus.workflows.full",
-        "cirrus.utils.helpers",
+        # cirrus — compliance
+        "cirrus.compliance",
+        "cirrus.compliance.base",
+        "cirrus.compliance.context",
+        "cirrus.compliance.runner",
+        "cirrus.compliance.report",
+        "cirrus.compliance.checks",
+        "cirrus.compliance.checks.identity",
+        "cirrus.compliance.checks.admin",
+        "cirrus.compliance.checks.exchange",
+        "cirrus.compliance.checks.teams_sharepoint",
+        "cirrus.compliance.checks.logging",
     ],
     hookspath=[],
     hooksconfig={},
@@ -67,14 +79,13 @@ a = Analysis(
         "PIL",
         "IPython",
         "jupyter",
+        "test",
+        "unittest",
     ],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -87,7 +98,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,          # UPX not available on all CI runners — disabled
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,       # CLI tool — keep console window
@@ -96,7 +107,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # Windows: embed a version resource and icon (optional)
-    # version="build/version.txt",
-    # icon="build/cirrus.ico",
 )

@@ -9,9 +9,14 @@ on:
 permissions:
   contents: write   # Needed to create GitHub Releases
 
+# Opt into Node.js 24 now to avoid deprecation warnings becoming errors
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     strategy:
+      fail-fast: false    # Let all three platform builds run independently
       matrix:
         include:
           - os: windows-latest
@@ -40,13 +45,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Show PyInstaller version
+        run: pyinstaller --version
+
       - name: Build standalone executable with PyInstaller
-        run: pyinstaller cirrus.spec
+        run: pyinstaller --noconfirm cirrus.spec
 
       - name: Verify executable runs
+        shell: bash
         run: |
           ./dist/${{ matrix.artifact_name }} version
-        shell: bash
 
       - name: Compute SHA-256 of executable
         shell: bash
@@ -80,6 +88,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist/
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -106,7 +115,6 @@ jobs:
             ./cirrus-macos-x64 auth login --tenant yourtenant.com
             ./cirrus-macos-x64 run bec --tenant yourtenant.com --user user@yourtenant.com
             ```
-          files: |
-            dist/**/*
+          files: dist/*
           draft: false
           prerelease: false
