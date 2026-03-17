@@ -51,6 +51,7 @@ from cirrus.utils.deps import (
     check_all,
     install_all_missing,
 )
+from cirrus.utils.updater import apply_update, check_for_update, is_frozen
 from cirrus.workflows.base import render_summary
 from cirrus.workflows.bec import BECWorkflow
 from cirrus.workflows.full import FullWorkflow
@@ -800,6 +801,93 @@ def case_list(
         table.add_row(c.name, str(artifacts), audit_ok)
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Update command
+# ---------------------------------------------------------------------------
+
+@app.command("update")
+def update(
+    check_only: Annotated[bool, typer.Option("--check", help="Check for a new version without downloading.")] = False,
+) -> None:
+    """
+    Check for a newer version of CIRRUS and optionally update.
+
+    When run as a pre-built executable, downloads and replaces the binary
+    in-place. On Windows the swap happens automatically after this window
+    closes. On macOS/Linux the binary is replaced immediately.
+
+    Example:
+        cirrus update
+        cirrus update --check
+    """
+    _banner()
+
+    console.print("[bold]Checking for updates...[/bold]")
+    info = check_for_update()
+
+    if info.error:
+        console.print(f"[red]Could not reach GitHub:[/red] {info.error}")
+        raise typer.Exit(1)
+
+    console.print(f"  Current version : [cyan]{info.current_version}[/cyan]")
+    console.print(f"  Latest release  : [cyan]{info.latest_version}[/cyan]")
+
+    if not info.update_available:
+        console.print("\n[green]You are running the latest version.[/green]")
+        return
+
+    console.print(f"\n[yellow]New version available:[/yellow] v{info.latest_version}")
+
+    if info.release_notes:
+        console.print(f"\n[bold]Release notes:[/bold]\n{info.release_notes}\n")
+
+    if check_only:
+        console.print(
+            f"[dim]Run [bold]cirrus update[/bold] (without --check) to install.[/dim]"
+        )
+        return
+
+    if not is_frozen():
+        console.print(
+            "\n[yellow]Running from source — update via git:[/yellow]\n"
+            "  git pull && pip install -e ."
+        )
+        return
+
+    if not info.download_url:
+        console.print(
+            f"\n[yellow]No pre-built binary found for this platform ({info.asset_name}).[/yellow]\n"
+            "Download manually from: https://github.com/ctrlaltdean/cirrus/releases/latest"
+        )
+        raise typer.Exit(1)
+
+    if not Confirm.ask(f"\nDownload and install v{info.latest_version}?", default=True):
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    from rich.progress import BarColumn, DownloadColumn, Progress, TransferSpeedColumn
+
+    with Progress(
+        "[progress.description]{task.description}",
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Downloading...", total=None)
+
+        def _on_progress(downloaded: int, total: int) -> None:
+            progress.update(task, completed=downloaded, total=total)
+
+        ok, msg = apply_update(info.download_url, progress_callback=_on_progress)
+
+    if ok:
+        console.print(f"\n[green]✓[/green] {msg}")
+    else:
+        console.print(f"\n[red]✗ Update failed:[/red] {msg}")
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

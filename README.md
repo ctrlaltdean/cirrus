@@ -21,6 +21,7 @@ CIRRUS is a command-line tool for collecting forensic artifacts from Microsoft 3
   - [Authentication](#authentication)
   - [Investigation Workflows](#investigation-workflows)
   - [Compliance Audit](#compliance-audit)
+  - [Updating CIRRUS](#updating-cirrus)
   - [Dependency Management](#dependency-management)
   - [Case Management](#case-management)
 - [Output Structure](#output-structure)
@@ -302,6 +303,24 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 | 5 — SharePoint & OneDrive | 0 | 3 | 3 |
 | 6 — Logging & Monitoring | 0 | 4 | 4 |
 | **Total** | **15** | **19** | **34** |
+
+---
+
+### Updating CIRRUS
+
+CIRRUS can update itself from GitHub Releases:
+
+```bash
+# Check if a new version is available (no download)
+cirrus update --check
+
+# Check and install if a new version is available
+cirrus update
+```
+
+On **Windows**, the binary is swapped automatically after the current window closes — restart CIRRUS to use the new version. On **macOS/Linux**, the binary is replaced in-place immediately.
+
+When running from source, `cirrus update` will tell you to use `git pull` instead.
 
 ---
 

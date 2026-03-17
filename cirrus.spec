@@ -68,6 +68,7 @@ a = Analysis(
         "cirrus.utils.teams_ps",
         "cirrus.utils.sharepoint_ps",
         "cirrus.utils.deps",
+        "cirrus.utils.updater",
         # cirrus — compliance
         "cirrus.compliance",
         "cirrus.compliance.base",
