@@ -113,7 +113,6 @@ class RiskySignInsCollector(GraphCollector):
                 "deviceDetail,clientAppUsed"
             ),
             "$top": 999,
-            "$orderby": "createdDateTime desc",
         }
 
         return self._collect_all(

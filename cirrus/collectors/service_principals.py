@@ -54,6 +54,7 @@ class ServicePrincipalsCollector(GraphCollector):
         if days is not None:
             since = days_ago_filter(days)
             params["$filter"] = f"createdDateTime ge {since}"
+            params["$count"] = "true"  # createdDateTime requires advanced query support
 
         records = self._collect_all(f"{GRAPH_BASE}/servicePrincipals", params)
 

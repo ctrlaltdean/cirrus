@@ -64,6 +64,7 @@ class UsersCollector(GraphCollector):
         if days is not None:
             since = days_ago_filter(days)
             params["$filter"] = f"createdDateTime ge {since}"
+            params["$count"] = "true"  # createdDateTime requires advanced query support
 
         return self._collect_all(f"{GRAPH_BASE}/users", params)
 

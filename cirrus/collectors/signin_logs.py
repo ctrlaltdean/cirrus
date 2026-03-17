@@ -54,8 +54,6 @@ class SignInLogsCollector(GraphCollector):
         params: dict[str, Any] = {
             "$filter": " and ".join(filters),
             "$top": 999,
-            "$orderby": "createdDateTime desc",
-            "$count": "true",  # required when combining $filter + $orderby on signIns
             "$select": (
                 "id,createdDateTime,userDisplayName,userPrincipalName,userId,"
                 "appDisplayName,appId,ipAddress,location,clientAppUsed,"
