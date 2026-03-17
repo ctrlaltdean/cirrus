@@ -43,10 +43,14 @@ class ComplianceRunner:
         token: str,
         benchmark: Benchmark = "all",
         levels: list[int] | None = None,
+        tenant: str | None = None,
+        upn: str | None = None,
     ) -> None:
         self.token = token
         self.benchmark = benchmark
         self.levels = levels or [1, 2]
+        self.tenant = tenant
+        self.upn = upn
 
     def _select_checks(self) -> list[type[BaseCheck]]:
         selected = []
@@ -70,6 +74,11 @@ class ComplianceRunner:
     def run(self) -> "ComplianceReport":
         # Step 1: Build context
         console.print("\n[bold]Fetching tenant policy data...[/bold]")
+        if self.tenant:
+            console.print(
+                "[dim]Exchange Online checks may open a browser window for authentication. "
+                "This is normal — sign in with your Exchange admin account.[/dim]"
+            )
         builder = ContextBuilder(self.token)
 
         with Progress(
@@ -78,13 +87,37 @@ class ComplianceRunner:
             console=console,
             transient=True,
         ) as progress:
-            task = progress.add_task("Collecting policy data from Graph API...", total=None)
-            ctx = builder.build()
+            task = progress.add_task(
+                "Collecting policy data (Graph API + DNS + Exchange Online PS)...",
+                total=None,
+            )
+            ctx = builder.build(tenant=self.tenant, upn=self.upn)
             progress.update(task, completed=1, total=1)
 
         if ctx.fetch_errors:
             for key, err in ctx.fetch_errors.items():
                 console.print(f"  [yellow]⚠ Could not fetch {key}:[/yellow] {err}")
+
+        # Report Exchange PS and DNS status
+        if ctx.exchange_ps and ctx.exchange_ps.available:
+            console.print(
+                f"  [green]✓ Exchange Online PS connected[/green] "
+                f"(EXO module v{ctx.exchange_ps.exa_version})"
+            )
+        elif ctx.exchange_ps and ctx.exchange_ps.error:
+            console.print(
+                f"  [yellow]⚠ Exchange Online PS unavailable:[/yellow] {ctx.exchange_ps.error}\n"
+                "  [dim]Exchange checks will show as MANUAL. Run: cirrus deps install[/dim]"
+            )
+        if ctx.dns_results:
+            console.print(
+                f"  [green]✓ DNS checks completed[/green] for {len(ctx.dns_results)} domain(s): "
+                + ", ".join(ctx.dns_results.keys())
+            )
+        elif "dns" in ctx.fetch_errors:
+            console.print(
+                f"  [yellow]⚠ DNS checks unavailable:[/yellow] {ctx.fetch_errors['dns']}"
+            )
 
         # Step 2: Run checks
         selected = self._select_checks()

@@ -46,6 +46,11 @@ from cirrus.auth.authenticator import (
 from cirrus.compliance.report import render_terminal, save_report
 from cirrus.compliance.runner import ComplianceRunner
 from cirrus.output.case import Case
+from cirrus.utils.deps import (
+    DepStatus,
+    check_all,
+    install_all_missing,
+)
 from cirrus.workflows.base import render_summary
 from cirrus.workflows.bec import BECWorkflow
 from cirrus.workflows.full import FullWorkflow
@@ -63,10 +68,12 @@ app = typer.Typer(
 auth_app = typer.Typer(help="Manage authentication and cached credentials.", no_args_is_help=True)
 run_app = typer.Typer(help="Run investigation workflows.", no_args_is_help=True)
 case_app = typer.Typer(help="Manage investigation cases.", no_args_is_help=True)
+deps_app = typer.Typer(help="Check and install optional dependencies.", no_args_is_help=True)
 
 app.add_typer(auth_app, name="auth")
 app.add_typer(run_app, name="run")
 app.add_typer(case_app, name="case")
+app.add_typer(deps_app, name="deps")
 
 console = Console()
 
@@ -584,7 +591,7 @@ def run_audit(
     token, _ = _authenticate(tenant, client_id)
 
     # Run the compliance audit
-    runner = ComplianceRunner(token, benchmark=benchmark, levels=levels)
+    runner = ComplianceRunner(token, benchmark=benchmark, levels=levels, tenant=tenant)
     report = runner.run()
 
     # Render terminal report
@@ -616,6 +623,98 @@ def run_audit(
     # Non-zero exit when FAILs exist — useful for scheduled/automated runs
     if report.failed:
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# deps commands
+# ---------------------------------------------------------------------------
+
+@deps_app.command("check")
+def deps_check() -> None:
+    """
+    Show the status of optional CIRRUS dependencies.
+
+    Checks for: dnspython (DNS compliance checks),
+    PowerShell 7 (Exchange Online PS), ExchangeOnlineManagement module.
+    """
+    _banner()
+    console.print("[bold]Checking optional dependencies...[/bold]\n")
+
+    results = check_all()
+
+    table = Table(border_style="bright_blue", header_style="bold magenta", show_header=True)
+    table.add_column("Dependency", style="bold", min_width=28)
+    table.add_column("Status", min_width=10)
+    table.add_column("Version", min_width=10)
+    table.add_column("Notes")
+
+    all_ok = True
+    for dep in results:
+        if dep.status == DepStatus.OK:
+            status_str = "[green]✓  OK[/green]"
+            notes = dep.message
+        else:
+            status_str = "[yellow]✗  MISSING[/yellow]"
+            notes = dep.message + (f"\n  Install: {dep.install_hint}" if dep.install_hint else "")
+            all_ok = False
+        table.add_row(dep.name, status_str, dep.version or "—", notes)
+
+    console.print(table)
+
+    if not all_ok:
+        console.print(
+            "\n[yellow]Some dependencies are missing. Run [bold]cirrus deps install[/bold] "
+            "to install them automatically.[/yellow]"
+        )
+    else:
+        console.print("\n[green]All optional dependencies are installed.[/green]")
+
+
+@deps_app.command("install")
+def deps_install() -> None:
+    """
+    Install missing optional CIRRUS dependencies.
+
+    Installs: dnspython (via pip), ExchangeOnlineManagement module (via
+    PowerShell Install-Module). PowerShell itself must be installed manually.
+    """
+    _banner()
+    console.print("[bold]Checking dependencies...[/bold]\n")
+
+    results = check_all()
+    missing = [d for d in results if d.status != DepStatus.OK]
+
+    if not missing:
+        console.print("[green]All optional dependencies are already installed.[/green]")
+        return
+
+    for dep in missing:
+        console.print(f"  [yellow]✗ Missing:[/yellow] {dep.name} — {dep.message}")
+    console.print()
+
+    if not Confirm.ask(f"Install {len(missing)} missing dependency/dependencies?", default=True):
+        console.print("[dim]Cancelled.[/dim]")
+        raise typer.Exit(0)
+
+    console.print()
+    outcomes = install_all_missing(results)
+
+    any_failed = False
+    for name, ok, msg in outcomes:
+        if ok:
+            console.print(f"  [green]✓ {name}:[/green] {msg}")
+        else:
+            console.print(f"  [red]✗ {name}:[/red] {msg}")
+            any_failed = True
+
+    console.print()
+    if any_failed:
+        console.print(
+            "[yellow]Some installations failed. See messages above for details.[/yellow]"
+        )
+        raise typer.Exit(1)
+    else:
+        console.print("[green]Done. Run [bold]cirrus deps check[/bold] to verify.[/green]")
 
 
 # ---------------------------------------------------------------------------

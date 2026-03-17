@@ -132,13 +132,18 @@ class CheckSecurityDefaults(BaseCheck):
             )
 
 
-class CheckModernAuthExchange(ManualCheck):
+class CheckModernAuthExchange(BaseCheck):
+    """
+    M365-1.1.2  Modern Authentication enabled for Exchange Online.
+    Automated: uses OAuth2ClientProfileEnabled from Exchange Online org config (PS batch).
+    Fallback: MANUAL instructions.
+    """
     control_id = "M365-1.1.2"
     title = "Modern Authentication enabled for Exchange Online"
     benchmark = "CIS M365"
     level = 1
     section = "1 - Identity & Access Management"
-    expected = "Modern authentication enabled (OAuth 2.0 / OIDC)"
+    expected = "OAuth2ClientProfileEnabled = True (modern auth on)"
     rationale = "Legacy Basic Auth for Exchange allows credential stuffing and bypasses MFA."
     remediation = "Run: Set-OrganizationConfig -OAuth2ClientProfileEnabled $true"
     manual_steps = (
@@ -150,6 +155,42 @@ class CheckModernAuthExchange(ManualCheck):
         "  Settings > Org Settings > Modern Authentication"
     )
     reference = "CIS M365 v3.1 §1.1.2"
+
+    def run(self, ctx: PolicyContext) -> CheckResult:
+        ps = ctx.exchange_ps
+        if not ps or not ps.available:
+            ps_error = ps.error if ps else "Exchange PS not run"
+            return self._result(
+                CheckStatus.MANUAL,
+                actual=f"Exchange Online PS unavailable: {ps_error}",
+                notes=self.manual_steps,
+            )
+
+        org_config = ps.org_config
+        if not org_config:
+            return self._result(
+                CheckStatus.MANUAL,
+                actual="Org config not returned from PS — verify manually",
+                notes=self.manual_steps,
+            )
+
+        modern_auth = org_config.get("OAuth2ClientProfileEnabled")
+        if modern_auth is True:
+            return self._result(
+                CheckStatus.PASS,
+                actual="OAuth2ClientProfileEnabled = True — modern authentication is enabled",
+            )
+        if modern_auth is False:
+            return self._result(
+                CheckStatus.FAIL,
+                actual="OAuth2ClientProfileEnabled = False — legacy auth is in use",
+            )
+
+        return self._result(
+            CheckStatus.MANUAL,
+            actual="OAuth2ClientProfileEnabled state unknown — verify manually",
+            notes=self.manual_steps,
+        )
 
 
 # ---------------------------------------------------------------------------

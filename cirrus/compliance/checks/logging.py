@@ -35,13 +35,18 @@ class CheckUnifiedAuditLog(ManualCheck):
     reference = "CIS M365 v3.1 §6.1.1"
 
 
-class CheckMailboxAuditEnabled(ManualCheck):
+class CheckMailboxAuditEnabled(BaseCheck):
+    """
+    M365-6.1.2  Mailbox auditing enabled for all users.
+    Automated: uses AuditDisabled from Exchange Online org config (PS batch).
+    Fallback: MANUAL instructions.
+    """
     control_id = "M365-6.1.2"
     title = "Mailbox auditing enabled for all users"
     benchmark = "CIS M365"
     level = 1
     section = "6 - Logging & Monitoring"
-    expected = "AuditEnabled = True for all user mailboxes; MailboxAuditBypassAccess not set"
+    expected = "Org-level AuditDisabled = False (mailbox auditing on for all mailboxes)"
     rationale = "Mailbox audit logs record who accessed mailboxes and what actions were taken — critical for BEC investigation."
     remediation = (
         "Exchange Online PowerShell:\n"
@@ -60,6 +65,42 @@ class CheckMailboxAuditEnabled(ManualCheck):
         "     Expected: Empty or only system accounts"
     )
     reference = "CIS M365 v3.1 §6.1.2"
+
+    def run(self, ctx: PolicyContext) -> CheckResult:
+        ps = ctx.exchange_ps
+        if not ps or not ps.available:
+            ps_error = ps.error if ps else "Exchange PS not run"
+            return self._result(
+                CheckStatus.MANUAL,
+                actual=f"Exchange Online PS unavailable: {ps_error}",
+                notes=self.manual_steps,
+            )
+
+        org_config = ps.org_config
+        if not org_config:
+            return self._result(
+                CheckStatus.MANUAL,
+                actual="Org config not returned from PS — verify manually",
+                notes=self.manual_steps,
+            )
+
+        audit_disabled = org_config.get("AuditDisabled")
+        if audit_disabled is False:
+            return self._result(
+                CheckStatus.PASS,
+                actual="AuditDisabled = False — org-level mailbox auditing is enabled",
+            )
+        if audit_disabled is True:
+            return self._result(
+                CheckStatus.FAIL,
+                actual="AuditDisabled = True — mailbox auditing is disabled at org level",
+            )
+
+        return self._result(
+            CheckStatus.MANUAL,
+            actual="AuditDisabled state unknown — verify manually",
+            notes=self.manual_steps,
+        )
 
 
 class CheckAuditLogRetention(ManualCheck):

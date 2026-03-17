@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 import requests
 
 from cirrus.collectors.base import GRAPH_BASE, GRAPH_BETA, GraphCollector
+from cirrus.utils.dns_checker import DNS_AVAILABLE, DomainDnsResults, check_all_dns
+from cirrus.utils.exchange_ps import ExchangePSResults, run_exchange_batch
 
 
 @dataclass
@@ -29,6 +31,9 @@ class PolicyContext:
     organization: dict = field(default_factory=dict)
     subscribed_skus: list[dict] = field(default_factory=list)
 
+    # Verified custom domains (excludes *.onmicrosoft.com)
+    domains: list[str] = field(default_factory=list)
+
     # Directory (admin roles, users)
     global_admins: list[dict] = field(default_factory=list)
     privileged_role_members: dict[str, list[dict]] = field(default_factory=dict)
@@ -36,6 +41,12 @@ class PolicyContext:
     # Security / Secure Score
     secure_score: dict = field(default_factory=dict)
     secure_score_profiles: list[dict] = field(default_factory=list)
+
+    # DNS check results per domain (requires dnspython)
+    dns_results: dict[str, DomainDnsResults] = field(default_factory=dict)
+
+    # Exchange Online PowerShell batch results (requires pwsh + EXO module)
+    exchange_ps: ExchangePSResults | None = None
 
     # Errors encountered during pre-fetch (non-fatal)
     fetch_errors: dict[str, str] = field(default_factory=dict)
@@ -63,7 +74,20 @@ class ContextBuilder(GraphCollector):
         "Teams Administrator": TEAMS_ADMIN_ID,
     }
 
-    def build(self) -> PolicyContext:
+    def build(
+        self,
+        tenant: str | None = None,
+        upn: str | None = None,
+    ) -> PolicyContext:
+        """
+        Fetch all tenant data and return a populated PolicyContext.
+
+        Args:
+            tenant: Tenant domain hint (used for DNS/PS checks if Graph
+                    does not return verified domains).
+            upn:    UPN of the authenticated user — passed to
+                    Connect-ExchangeOnline as a login hint.
+        """
         ctx = PolicyContext()
 
         # --- Identity Security Defaults ---
@@ -110,15 +134,33 @@ class ContextBuilder(GraphCollector):
         except Exception as e:
             ctx.fetch_errors["auth_methods_policy"] = str(e)
 
-        # --- Organization ---
+        # --- Organization (includes verified domains) ---
         try:
             orgs = self._collect_all(
                 f"{GRAPH_BASE}/organization",
-                params={"$select": "id,displayName,passwordPolicies,onPremisesSyncEnabled,assignedPlans,provisionedPlans"},
+                params={
+                    "$select": (
+                        "id,displayName,passwordPolicies,onPremisesSyncEnabled,"
+                        "assignedPlans,provisionedPlans,verifiedDomains"
+                    )
+                },
             )
             ctx.organization = orgs[0] if orgs else {}
+
+            # Extract custom verified domains (exclude *.onmicrosoft.com)
+            verified = ctx.organization.get("verifiedDomains") or []
+            ctx.domains = [
+                d["name"] for d in verified
+                if isinstance(d, dict)
+                and d.get("name")
+                and not d["name"].lower().endswith(".onmicrosoft.com")
+            ]
         except Exception as e:
             ctx.fetch_errors["organization"] = str(e)
+
+        # Fall back to the tenant hint if Graph didn't give us domains
+        if not ctx.domains and tenant:
+            ctx.domains = [tenant]
 
         # --- Subscribed SKUs (license info) ---
         try:
@@ -168,5 +210,27 @@ class ContextBuilder(GraphCollector):
             )
         except Exception as e:
             ctx.fetch_errors["secure_score_profiles"] = str(e)
+
+        # -----------------------------------------------------------------------
+        # DNS-based checks (DMARC / SPF / DKIM) — requires dnspython
+        # -----------------------------------------------------------------------
+        if DNS_AVAILABLE and ctx.domains:
+            for domain in ctx.domains:
+                try:
+                    ctx.dns_results[domain] = check_all_dns(domain)
+                except Exception as e:
+                    ctx.dns_results[domain] = DomainDnsResults(domain=domain, error=str(e))
+        elif not DNS_AVAILABLE:
+            ctx.fetch_errors["dns"] = "dnspython not installed — run 'cirrus deps install' to enable DNS checks"
+
+        # -----------------------------------------------------------------------
+        # Exchange Online PowerShell batch — requires pwsh + EXO module
+        # -----------------------------------------------------------------------
+        primary_domain = tenant or (ctx.domains[0] if ctx.domains else None)
+        if primary_domain:
+            ctx.exchange_ps = run_exchange_batch(primary_domain, upn)
+        else:
+            ctx.exchange_ps = ExchangePSResults()
+            ctx.exchange_ps.error = "No tenant domain available for Exchange Online connection"
 
         return ctx

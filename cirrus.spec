@@ -54,6 +54,18 @@ a = Analysis(
         "cirrus.workflows.base",
         "cirrus.workflows.bec",
         "cirrus.workflows.full",
+        # DNS (dnspython)
+        "dns",
+        "dns.resolver",
+        "dns.rdatatype",
+        "dns.exception",
+        "dns.rdtypes",
+        "dns.rdtypes.ANY",
+        "dns.rdtypes.IN",
+        # cirrus — utils
+        "cirrus.utils.dns_checker",
+        "cirrus.utils.exchange_ps",
+        "cirrus.utils.deps",
         # cirrus — compliance
         "cirrus.compliance",
         "cirrus.compliance.base",
