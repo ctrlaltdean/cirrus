@@ -62,7 +62,7 @@ class SignInLogsCollector(GraphCollector):
                 "riskDetail,riskEventTypes,riskLevelAggregated,riskLevelDuringSignIn,"
                 "riskState,status,deviceDetail,authenticationDetails,"
                 "authenticationRequirement,homeTenantId,resourceDisplayName,resourceId,"
-                "flaggedForReview,tokenIssuerType,networkLocationDetails"
+                "tokenIssuerType,networkLocationDetails"
             ),
         }
 
