@@ -22,6 +22,9 @@ GRAPH_BETA = "https://graph.microsoft.com/beta"
 MAX_RETRIES = 5
 BACKOFF_BASE = 2  # seconds
 
+# Entra ID P2 service plan ID — required for Identity Protection endpoints
+_P2_SERVICE_PLAN_ID = "eec0eb4f-6444-4f95-aba0-50c24d67f998"
+
 
 class CollectorError(Exception):
     """Raised when a collection cannot be completed."""
@@ -84,7 +87,18 @@ class GraphCollector:
             if resp.status_code == 404:
                 raise CollectorError(f"HTTP 404: Resource not found: {url}")
 
-            resp.raise_for_status()
+            if resp.status_code == 400:
+                try:
+                    detail = resp.json().get("error", {}).get("message", resp.text[:300])
+                except Exception:
+                    detail = resp.text[:300]
+                raise CollectorError(f"HTTP 400: Bad request to {url} — {detail}")
+
+            try:
+                resp.raise_for_status()
+            except Exception as http_err:
+                raise CollectorError(f"HTTP {resp.status_code}: {url} — {http_err}") from http_err
+
             return resp.json()
 
         raise CollectorError(f"Failed after {MAX_RETRIES} retries: {url}")
@@ -110,7 +124,18 @@ class GraphCollector:
             if resp.status_code == 403:
                 raise CollectorError(f"HTTP 403: Permission denied at {url}.")
 
-            resp.raise_for_status()
+            if resp.status_code == 400:
+                try:
+                    detail = resp.json().get("error", {}).get("message", resp.text[:300])
+                except Exception:
+                    detail = resp.text[:300]
+                raise CollectorError(f"HTTP 400: Bad request to {url} — {detail}")
+
+            try:
+                resp.raise_for_status()
+            except Exception as http_err:
+                raise CollectorError(f"HTTP {resp.status_code}: {url} — {http_err}") from http_err
+
             return resp.json()
 
         raise CollectorError(f"POST failed after {MAX_RETRIES} retries: {url}")
@@ -137,6 +162,23 @@ class GraphCollector:
         for page in self._paginate(url, params):
             records.extend(page.get("value", []))
         return records
+
+    def _has_p2_license(self) -> bool:
+        """Return True if the tenant has at least one active Entra ID P2 service plan."""
+        try:
+            data = self._get(
+                f"{GRAPH_BASE}/subscribedSkus",
+                params={"$select": "servicePlans,capabilityStatus"},
+            )
+            for sku in data.get("value", []):
+                if sku.get("capabilityStatus", "").lower() != "enabled":
+                    continue
+                for plan in sku.get("servicePlans", []):
+                    if plan.get("servicePlanId") == _P2_SERVICE_PLAN_ID:
+                        return True
+            return False
+        except Exception:
+            return True  # assume available; let the actual API call surface the real error
 
     def collect(self, **kwargs: Any) -> list[dict]:
         """

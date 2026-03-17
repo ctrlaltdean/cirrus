@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from cirrus.collectors.base import GRAPH_BASE, GraphCollector
+from cirrus.collectors.base import GRAPH_BASE, CollectorError, GraphCollector
 from cirrus.utils.helpers import days_ago_filter
 
 
@@ -50,6 +50,13 @@ class RiskyUsersCollector(GraphCollector):
 
         Returns list of risky user dicts.
         """
+        if not self._has_p2_license():
+            raise CollectorError(
+                "Skipped: Entra ID P2 license not found on this tenant. "
+                "Identity Protection (riskyUsers) requires Microsoft 365 E5 or "
+                "Entra ID P2. This tenant appears to be licensed at P1 only."
+            )
+
         filters: list[str] = []
 
         if risk_levels:
@@ -95,6 +102,13 @@ class RiskySignInsCollector(GraphCollector):
 
         Returns list of risky sign-in dicts.
         """
+        if not self._has_p2_license():
+            raise CollectorError(
+                "Skipped: Entra ID P2 license not found on this tenant. "
+                "Identity Protection (riskySignIns) requires Microsoft 365 E5 or "
+                "Entra ID P2. This tenant appears to be licensed at P1 only."
+            )
+
         since = days_ago_filter(days)
         filters = [f"createdDateTime ge {since}"]
 
@@ -108,8 +122,8 @@ class RiskySignInsCollector(GraphCollector):
             "$filter": " and ".join(filters),
             "$select": (
                 "id,createdDateTime,userDisplayName,userPrincipalName,userId,"
-                "ipAddress,location,riskDetail,riskEventTypes,riskEventTypes_v2,"
-                "riskLevelAggregated,riskLevelDuringSignIn,riskState,status,"
+                "ipAddress,location,riskDetail,riskEventTypes_v2,"
+                "riskLevelAggregated,riskLevelDuringSignIn,riskState,"
                 "deviceDetail,clientAppUsed"
             ),
             "$top": 999,
