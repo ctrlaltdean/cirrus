@@ -65,6 +65,8 @@ a = Analysis(
         # cirrus — utils
         "cirrus.utils.dns_checker",
         "cirrus.utils.exchange_ps",
+        "cirrus.utils.teams_ps",
+        "cirrus.utils.sharepoint_ps",
         "cirrus.utils.deps",
         # cirrus — compliance
         "cirrus.compliance",

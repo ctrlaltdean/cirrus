@@ -14,6 +14,8 @@ import requests
 from cirrus.collectors.base import GRAPH_BASE, GRAPH_BETA, GraphCollector
 from cirrus.utils.dns_checker import DNS_AVAILABLE, DomainDnsResults, check_all_dns
 from cirrus.utils.exchange_ps import ExchangePSResults, run_exchange_batch
+from cirrus.utils.teams_ps import TeamsPSResults, run_teams_batch
+from cirrus.utils.sharepoint_ps import SharePointPSResults, derive_spo_admin_url, run_sharepoint_batch
 
 
 @dataclass
@@ -47,6 +49,15 @@ class PolicyContext:
 
     # Exchange Online PowerShell batch results (requires pwsh + EXO module)
     exchange_ps: ExchangePSResults | None = None
+
+    # Microsoft Teams PowerShell batch results (requires MicrosoftTeams module)
+    teams_ps: TeamsPSResults | None = None
+
+    # SharePoint Online PowerShell batch results (requires SPO module)
+    sharepoint_ps: SharePointPSResults | None = None
+
+    # Tenant prefix (e.g. "contoso" from "contoso.onmicrosoft.com") for SPO URL
+    tenant_prefix: str = ""
 
     # Errors encountered during pre-fetch (non-fatal)
     fetch_errors: dict[str, str] = field(default_factory=dict)
@@ -155,6 +166,16 @@ class ContextBuilder(GraphCollector):
                 and d.get("name")
                 and not d["name"].lower().endswith(".onmicrosoft.com")
             ]
+
+            # Extract tenant prefix from *.onmicrosoft.com initial domain
+            for d in verified:
+                if isinstance(d, dict) and d.get("name", "").lower().endswith(".onmicrosoft.com"):
+                    ctx.tenant_prefix = d["name"].lower().replace(".onmicrosoft.com", "")
+                    break
+            # Fall back to tenant hint
+            if not ctx.tenant_prefix and tenant:
+                # Strip TLD - "contoso.com" -> "contoso", "contoso.onmicrosoft.com" -> "contoso"
+                ctx.tenant_prefix = tenant.split(".")[0].lower()
         except Exception as e:
             ctx.fetch_errors["organization"] = str(e)
 
@@ -232,5 +253,20 @@ class ContextBuilder(GraphCollector):
         else:
             ctx.exchange_ps = ExchangePSResults()
             ctx.exchange_ps.error = "No tenant domain available for Exchange Online connection"
+
+        # -----------------------------------------------------------------------
+        # Microsoft Teams PowerShell batch — requires MicrosoftTeams module
+        # -----------------------------------------------------------------------
+        ctx.teams_ps = run_teams_batch(upn)
+
+        # -----------------------------------------------------------------------
+        # SharePoint Online PowerShell batch — requires SPO module
+        # -----------------------------------------------------------------------
+        if ctx.tenant_prefix:
+            spo_admin_url = derive_spo_admin_url(ctx.tenant_prefix)
+            ctx.sharepoint_ps = run_sharepoint_batch(spo_admin_url, upn)
+        else:
+            ctx.sharepoint_ps = SharePointPSResults()
+            ctx.sharepoint_ps.error = "Could not determine SharePoint admin URL (no tenant prefix)"
 
         return ctx

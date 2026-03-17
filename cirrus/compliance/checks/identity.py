@@ -162,7 +162,8 @@ class CheckModernAuthExchange(BaseCheck):
             ps_error = ps.error if ps else "Exchange PS not run"
             return self._result(
                 CheckStatus.MANUAL,
-                actual=f"Exchange Online PS unavailable: {ps_error}",
+                self.expected,
+                f"Exchange Online PS unavailable: {ps_error}",
                 notes=self.manual_steps,
             )
 
@@ -170,7 +171,8 @@ class CheckModernAuthExchange(BaseCheck):
         if not org_config:
             return self._result(
                 CheckStatus.MANUAL,
-                actual="Org config not returned from PS — verify manually",
+                self.expected,
+                "Org config not returned from PS — verify manually",
                 notes=self.manual_steps,
             )
 
@@ -178,17 +180,20 @@ class CheckModernAuthExchange(BaseCheck):
         if modern_auth is True:
             return self._result(
                 CheckStatus.PASS,
-                actual="OAuth2ClientProfileEnabled = True — modern authentication is enabled",
+                self.expected,
+                "OAuth2ClientProfileEnabled = True — modern authentication is enabled",
             )
         if modern_auth is False:
             return self._result(
                 CheckStatus.FAIL,
-                actual="OAuth2ClientProfileEnabled = False — legacy auth is in use",
+                self.expected,
+                "OAuth2ClientProfileEnabled = False — legacy auth is in use",
             )
 
         return self._result(
             CheckStatus.MANUAL,
-            actual="OAuth2ClientProfileEnabled state unknown — verify manually",
+            self.expected,
+            "OAuth2ClientProfileEnabled state unknown — verify manually",
             notes=self.manual_steps,
         )
 

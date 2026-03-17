@@ -91,6 +91,9 @@ class ExchangePSResults:
     outbound_spam_policies: list[dict] = field(default_factory=list)
     external_in_outlook: dict = field(default_factory=dict)
     org_config: dict = field(default_factory=dict)
+    dkim_signing_configs: list[dict] = field(default_factory=list)
+    admin_audit_log_config: dict = field(default_factory=dict)
+    audit_retention_policies: list[dict] = field(default_factory=list)
 
 
 def run_exchange_batch(tenant: str, upn: str | None = None) -> ExchangePSResults:
@@ -122,10 +125,10 @@ def run_exchange_batch(tenant: str, upn: str | None = None) -> ExchangePSResults
 
     results.exa_version = exa_version
 
-    # Build the connect command — include UPN hint if available
-    connect_cmd = "Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop"
-    if upn:
-        connect_cmd += f" -UserPrincipalName '{upn}'"
+    # Build connect command using env vars (avoids f-string in PS script)
+    connect_cmd = "$_connectArgs = @{ ShowBanner = $false; ErrorAction = 'Stop' }\n"
+    connect_cmd += "if ($env:CIRRUS_EXO_UPN) { $_connectArgs['UserPrincipalName'] = $env:CIRRUS_EXO_UPN }\n"
+    connect_cmd += "Connect-ExchangeOnline @_connectArgs"
 
     # Single PowerShell script that connects once and runs all cmdlets,
     # outputting a JSON object with all results.
@@ -179,7 +182,34 @@ try {
         $result.org_config = $oc
     } catch { $result.org_config = @{} }
 
+    # DKIM Signing Configs
+    try {
+        $result.dkim_signing = @(Get-DkimSigningConfig | Select-Object Domain, Enabled, Status)
+    } catch { $result.dkim_signing = @() }
+
+    # Admin Audit Log Config (includes UAL ingestion status)
+    try {
+        $alc = Get-AdminAuditLogConfig | Select-Object UnifiedAuditLogIngestionEnabled, AdminAuditLogEnabled
+        $result.admin_audit_log = $alc
+    } catch { $result.admin_audit_log = @{ Error = $_.Exception.Message } }
+
     Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+
+    # Security & Compliance (IPPS) — audit log retention policies
+    # Connect-IPPSSession is provided by the same ExchangeOnlineManagement module
+    try {
+        $_ippsArgs = @{ ShowBanner = $false; ErrorAction = 'Stop' }
+        if ($env:CIRRUS_EXO_UPN) { $_ippsArgs['UserPrincipalName'] = $env:CIRRUS_EXO_UPN }
+        Connect-IPPSSession @_ippsArgs
+        try {
+            $result.audit_retention = @(Get-UnifiedAuditLogRetentionPolicy | Select-Object Name, RetentionDuration, RecordTypes, Priority)
+        } catch {
+            $result.audit_retention = @(@{ Error = $_.Exception.Message })
+        }
+        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    } catch {
+        $result.audit_retention = @(@{ ConnectError = "IPPS connection failed: " + $_.Exception.Message })
+    }
 
     $result | ConvertTo-Json -Depth 6 -Compress
 
@@ -196,7 +226,7 @@ try {
             capture_output=True,
             text=True,
             timeout=300,  # 5 min — allows time for browser auth on first run
-            env={**os.environ, "CIRRUS_EXO_TENANT": tenant},
+            env={**os.environ, "CIRRUS_EXO_TENANT": tenant, "CIRRUS_EXO_UPN": upn or ""},
         )
     except subprocess.TimeoutExpired:
         results.error = "Exchange Online PowerShell timed out (5 min). Check your network connection."
@@ -230,6 +260,9 @@ try {
     results.outbound_spam_policies = _ensure_list(data.get("outbound_spam", []))
     results.external_in_outlook = data.get("external_in_outlook") or {}
     results.org_config = data.get("org_config") or {}
+    results.dkim_signing_configs = _ensure_list(data.get("dkim_signing", []))
+    results.admin_audit_log_config = data.get("admin_audit_log") or {}
+    results.audit_retention_policies = _ensure_list(data.get("audit_retention", []))
 
     return results
 

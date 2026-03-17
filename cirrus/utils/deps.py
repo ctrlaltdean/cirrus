@@ -107,12 +107,65 @@ def check_exo_module() -> DepResult:
     )
 
 
+def check_teams_module() -> DepResult:
+    """Check if MicrosoftTeams PS module is installed."""
+    from cirrus.utils.exchange_ps import find_powershell
+    from cirrus.utils.teams_ps import check_teams_module_installed
+    ps = find_powershell()
+    if not ps:
+        return DepResult(
+            name="MicrosoftTeams (PS module)",
+            status=DepStatus.MISSING,
+            message="PowerShell not found — required to check Teams module.",
+            install_hint="Install PowerShell 7 first.",
+        )
+    is_installed, version = check_teams_module_installed(ps)
+    if is_installed:
+        return DepResult(
+            name="MicrosoftTeams (PS module)", status=DepStatus.OK, version=version,
+            message="Teams compliance checks are available.",
+        )
+    return DepResult(
+        name="MicrosoftTeams (PS module)",
+        status=DepStatus.MISSING,
+        message="Required for Teams compliance checks.",
+        install_hint='cirrus deps install  (or: pwsh -Command "Install-Module MicrosoftTeams -Scope CurrentUser -Force")',
+    )
+
+
+def check_spo_module() -> DepResult:
+    """Check if Microsoft.Online.SharePoint.PowerShell PS module is installed."""
+    from cirrus.utils.exchange_ps import find_powershell
+    from cirrus.utils.sharepoint_ps import check_spo_module_installed
+    ps = find_powershell()
+    if not ps:
+        return DepResult(
+            name="SharePoint Online (PS module)",
+            status=DepStatus.MISSING,
+            message="PowerShell not found — required to check SPO module.",
+            install_hint="Install PowerShell 7 first.",
+        )
+    is_installed, version = check_spo_module_installed(ps)
+    if is_installed:
+        return DepResult(
+            name="SharePoint Online (PS module)", status=DepStatus.OK, version=version,
+            message="SharePoint compliance checks are available.",
+        )
+    return DepResult(
+        name="SharePoint Online (PS module)",
+        status=DepStatus.MISSING,
+        message="Required for SharePoint Online compliance checks.",
+        install_hint='cirrus deps install  (or: pwsh -Command "Install-Module Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -Force")',
+    )
+
+
 def check_all() -> list[DepResult]:
-    """Run all dependency checks and return results."""
     return [
         check_dnspython(),
         check_powershell(),
         check_exo_module(),
+        check_teams_module(),
+        check_spo_module(),
     ]
 
 
@@ -164,6 +217,48 @@ def install_exo_module() -> tuple[bool, str]:
         return False, str(e)
 
 
+def install_teams_module() -> tuple[bool, str]:
+    """Install MicrosoftTeams module via PowerShell. Returns (success, message)."""
+    from cirrus.utils.exchange_ps import find_powershell
+    ps = find_powershell()
+    if not ps:
+        return False, "PowerShell not found."
+    try:
+        result = subprocess.run(
+            [ps, "-NonInteractive", "-NoProfile", "-Command",
+             "Install-Module MicrosoftTeams -Scope CurrentUser -Force -AllowClobber"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode == 0:
+            return True, "MicrosoftTeams module installed successfully."
+        return False, result.stderr.strip() or result.stdout.strip() or "PowerShell exited non-zero."
+    except subprocess.TimeoutExpired:
+        return False, "Module installation timed out (5 min)."
+    except Exception as e:
+        return False, str(e)
+
+
+def install_spo_module() -> tuple[bool, str]:
+    """Install Microsoft.Online.SharePoint.PowerShell module. Returns (success, message)."""
+    from cirrus.utils.exchange_ps import find_powershell
+    ps = find_powershell()
+    if not ps:
+        return False, "PowerShell not found."
+    try:
+        result = subprocess.run(
+            [ps, "-NonInteractive", "-NoProfile", "-Command",
+             "Install-Module Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -Force -AllowClobber"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode == 0:
+            return True, "Microsoft.Online.SharePoint.PowerShell module installed successfully."
+        return False, result.stderr.strip() or result.stdout.strip() or "PowerShell exited non-zero."
+    except subprocess.TimeoutExpired:
+        return False, "Module installation timed out (5 min)."
+    except Exception as e:
+        return False, str(e)
+
+
 def install_all_missing(results: list[DepResult]) -> list[tuple[str, bool, str]]:
     """
     Install any missing installable dependencies.
@@ -192,5 +287,13 @@ def install_all_missing(results: list[DepResult]) -> list[tuple[str, bool, str]]
                 "  macOS:   brew install --cask powershell\n"
                 "  Linux:   https://aka.ms/install-powershell",
             ))
+
+        elif dep.name == "MicrosoftTeams (PS module)":
+            ok, msg = install_teams_module()
+            outcomes.append(("MicrosoftTeams (PS module)", ok, msg))
+
+        elif dep.name == "SharePoint Online (PS module)":
+            ok, msg = install_spo_module()
+            outcomes.append(("SharePoint Online (PS module)", ok, msg))
 
     return outcomes

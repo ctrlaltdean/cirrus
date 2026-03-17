@@ -588,6 +588,29 @@ def run_audit(
         console.print(f"[bold]Benchmark:[/bold] {benchmark}")
         console.print(f"[bold]Level:[/bold]     {level}\n")
 
+    # --- Dependency status check ---
+    console.print("\n[bold]Checking optional dependencies...[/bold]")
+    dep_results = check_all()
+    missing = [d for d in dep_results if not d.ok]
+    if missing:
+        dep_table = Table(border_style="dim", show_header=False, box=None, padding=(0, 2))
+        dep_table.add_column("Status", min_width=12)
+        dep_table.add_column("Dependency")
+        dep_table.add_column("Notes", style="dim")
+        for dep in dep_results:
+            if dep.ok:
+                dep_table.add_row(f"[green]✓[/green] {dep.version or 'OK'}", dep.name, "")
+            else:
+                dep_table.add_row("[yellow]✗ MISSING[/yellow]", dep.name, dep.message)
+        console.print(dep_table)
+        console.print(
+            f"  [yellow]{len(missing)} dependency/dependencies missing — "
+            "those checks will show as MANUAL.[/yellow]\n"
+            "  [dim]Run [bold]cirrus deps install[/bold] to install them.[/dim]\n"
+        )
+    else:
+        console.print("  [green]All optional dependencies available.[/green]\n")
+
     token, _ = _authenticate(tenant, client_id)
 
     # Run the compliance audit

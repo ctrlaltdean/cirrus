@@ -118,6 +118,14 @@ class ComplianceRunner:
             console.print(
                 f"  [yellow]⚠ DNS checks unavailable:[/yellow] {ctx.fetch_errors['dns']}"
             )
+        if ctx.teams_ps and ctx.teams_ps.available:
+            console.print(f"  [green]✓ Teams PS connected[/green] (MicrosoftTeams v{ctx.teams_ps.teams_version})")
+        elif ctx.teams_ps and ctx.teams_ps.error:
+            console.print(f"  [yellow]⚠ Teams PS unavailable:[/yellow] {ctx.teams_ps.error}")
+        if ctx.sharepoint_ps and ctx.sharepoint_ps.available:
+            console.print(f"  [green]✓ SharePoint Online PS connected[/green] (SPO module v{ctx.sharepoint_ps.spo_version})")
+        elif ctx.sharepoint_ps and ctx.sharepoint_ps.error:
+            console.print(f"  [yellow]⚠ SharePoint PS unavailable:[/yellow] {ctx.sharepoint_ps.error}")
 
         # Step 2: Run checks
         selected = self._select_checks()

@@ -63,10 +63,32 @@ class CheckDKIM(BaseCheck):
     reference = "CIS M365 v3.1 §3.1.1"
 
     def run(self, ctx: PolicyContext) -> CheckResult:
+        # Prefer PS data (more authoritative — reflects EXO config, not just DNS)
+        if _ps_available(ctx) and ctx.exchange_ps.dkim_signing_configs:
+            configs = ctx.exchange_ps.dkim_signing_configs
+            failing = [
+                f"{c.get('Domain','?')} (Enabled={c.get('Enabled')}, Status={c.get('Status','')})"
+                for c in configs
+                if not c.get("Enabled") or c.get("Status", "").lower() not in ("valid", "")
+            ]
+            passing = [
+                f"{c.get('Domain','?')} (Enabled={c.get('Enabled')}, Status={c.get('Status','')})"
+                for c in configs
+                if c.get("Enabled") and c.get("Status", "").lower() in ("valid", "")
+            ]
+            if failing:
+                return self._result(
+                    CheckStatus.FAIL, self.expected,
+                    f"DKIM not enabled or invalid on: {', '.join(failing)}",
+                )
+            if passing:
+                return self._result(CheckStatus.PASS, self.expected, "; ".join(passing))
+
+        # Fall back to DNS check
         if not _dns_available(ctx):
             return self._result(
-                CheckStatus.MANUAL,
-                actual="DNS checks unavailable — install dnspython: cirrus deps install",
+                CheckStatus.MANUAL, self.expected,
+                "DNS checks unavailable — install dnspython: cirrus deps install",
                 notes=self.manual_steps,
             )
 
@@ -82,17 +104,17 @@ class CheckDKIM(BaseCheck):
         checked = passing + failing
         if not checked:
             return self._result(
-                CheckStatus.MANUAL,
-                actual="No DNS results available — verify manually",
+                CheckStatus.MANUAL, self.expected,
+                "No DNS results available — verify manually",
                 notes=self.manual_steps,
             )
 
         if failing:
             return self._result(
-                CheckStatus.FAIL,
-                actual=f"DKIM missing or misconfigured: {', '.join(failing)}",
+                CheckStatus.FAIL, self.expected,
+                f"DKIM missing or misconfigured: {', '.join(failing)}",
             )
-        return self._result(CheckStatus.PASS, actual="; ".join(passing))
+        return self._result(CheckStatus.PASS, self.expected, "; ".join(passing))
 
 
 class CheckDMARC(BaseCheck):
@@ -128,7 +150,8 @@ class CheckDMARC(BaseCheck):
         if not _dns_available(ctx):
             return self._result(
                 CheckStatus.MANUAL,
-                actual="DNS checks unavailable — install dnspython: cirrus deps install",
+                self.expected,
+                "DNS checks unavailable — install dnspython: cirrus deps install",
                 notes=self.manual_steps,
             )
 
@@ -153,22 +176,25 @@ class CheckDMARC(BaseCheck):
         if not checked:
             return self._result(
                 CheckStatus.MANUAL,
-                actual="No DNS results available — verify manually",
+                self.expected,
+                "No DNS results available — verify manually",
                 notes=self.manual_steps,
             )
 
         if failing:
             return self._result(
                 CheckStatus.FAIL,
-                actual=f"DMARC not enforced: {'; '.join(failing + warnings)}",
+                self.expected,
+                f"DMARC not enforced: {'; '.join(failing + warnings)}",
             )
         if warnings:
             return self._result(
                 CheckStatus.WARN,
-                actual=f"DMARC policy is p=none (not enforced): {'; '.join(warnings)}",
+                self.expected,
+                f"DMARC policy is p=none (not enforced): {'; '.join(warnings)}",
                 notes="Advance to p=quarantine or p=reject to enforce DMARC.",
             )
-        return self._result(CheckStatus.PASS, actual="; ".join(passing))
+        return self._result(CheckStatus.PASS, self.expected, "; ".join(passing))
 
 
 class CheckSPF(BaseCheck):
@@ -204,7 +230,8 @@ class CheckSPF(BaseCheck):
         if not _dns_available(ctx):
             return self._result(
                 CheckStatus.MANUAL,
-                actual="DNS checks unavailable — install dnspython: cirrus deps install",
+                self.expected,
+                "DNS checks unavailable — install dnspython: cirrus deps install",
                 notes=self.manual_steps,
             )
 
@@ -226,16 +253,18 @@ class CheckSPF(BaseCheck):
         if not checked:
             return self._result(
                 CheckStatus.MANUAL,
-                actual="No DNS results available — verify manually",
+                self.expected,
+                "No DNS results available — verify manually",
                 notes=self.manual_steps,
             )
 
         if failing:
             return self._result(
                 CheckStatus.FAIL,
-                actual=f"SPF misconfigured: {'; '.join(failing)}",
+                self.expected,
+                f"SPF misconfigured: {'; '.join(failing)}",
             )
-        return self._result(CheckStatus.PASS, actual="; ".join(passing))
+        return self._result(CheckStatus.PASS, self.expected, "; ".join(passing))
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +313,8 @@ class CheckAntiPhishingPolicy(BaseCheck):
             ps_error = ctx.exchange_ps.error if ctx.exchange_ps else "Exchange PS not run"
             return self._result(
                 CheckStatus.MANUAL,
-                actual=f"Exchange Online PS unavailable: {ps_error}",
+                self.expected,
+                f"Exchange Online PS unavailable: {ps_error}",
                 notes=self.manual_steps,
             )
 
@@ -292,25 +322,28 @@ class CheckAntiPhishingPolicy(BaseCheck):
         if not policies:
             return self._result(
                 CheckStatus.FAIL,
-                actual="No anti-phishing policies found",
+                self.expected,
+                "No anti-phishing policies found",
             )
 
         enabled = [p for p in policies if p.get("Enabled") is True]
         if not enabled:
             return self._result(
                 CheckStatus.FAIL,
-                actual=f"No enabled anti-phishing policies ({len(policies)} found, all disabled)",
+                self.expected,
+                f"No enabled anti-phishing policies ({len(policies)} found, all disabled)",
             )
 
-        # Find the best-configured policy
+        best = enabled[0]
         issues = []
-        best = enabled[0]  # Default or first enabled policy
-
         if not best.get("EnableMailboxIntelligence"):
             issues.append("Mailbox intelligence disabled")
         if not best.get("EnableMailboxIntelligenceProtection"):
             issues.append("Mailbox intelligence protection disabled")
-        if not best.get("EnableTargetedUserProtection") and best.get("ImpersonationProtectionState", "").lower() != "automatic":
+        if (
+            not best.get("EnableTargetedUserProtection")
+            and best.get("ImpersonationProtectionState", "").lower() != "automatic"
+        ):
             issues.append("User impersonation protection not fully enabled")
         if not best.get("EnableOrganizationDomainsProtection"):
             issues.append("Domain impersonation protection disabled")
@@ -318,13 +351,15 @@ class CheckAntiPhishingPolicy(BaseCheck):
         if issues:
             return self._result(
                 CheckStatus.WARN,
-                actual=f"Policy '{best.get('Name', '?')}' enabled but: {'; '.join(issues)}",
+                self.expected,
+                f"Policy '{best.get('Name', '?')}' enabled but: {'; '.join(issues)}",
                 notes="Review anti-phishing policy settings in Microsoft Defender portal.",
             )
 
         return self._result(
             CheckStatus.PASS,
-            actual=f"Policy '{best.get('Name', '?')}' enabled with mailbox intelligence and impersonation protection",
+            self.expected,
+            f"Policy '{best.get('Name', '?')}' enabled with mailbox intelligence and impersonation protection",
         )
 
 
@@ -367,7 +402,8 @@ class CheckSafeLinks(BaseCheck):
             ps_error = ctx.exchange_ps.error if ctx.exchange_ps else "Exchange PS not run"
             return self._result(
                 CheckStatus.MANUAL,
-                actual=f"Exchange Online PS unavailable: {ps_error}",
+                self.expected,
+                f"Exchange Online PS unavailable: {ps_error}",
                 notes=self.manual_steps,
             )
 
@@ -375,14 +411,16 @@ class CheckSafeLinks(BaseCheck):
         if not policies:
             return self._result(
                 CheckStatus.FAIL,
-                actual="No Safe Links policies found",
+                self.expected,
+                "No Safe Links policies found",
             )
 
         enabled = [p for p in policies if p.get("IsEnabled") is True]
         if not enabled:
             return self._result(
                 CheckStatus.FAIL,
-                actual=f"No enabled Safe Links policies ({len(policies)} found, all disabled)",
+                self.expected,
+                f"No enabled Safe Links policies ({len(policies)} found, all disabled)",
             )
 
         best = enabled[0]
@@ -399,16 +437,15 @@ class CheckSafeLinks(BaseCheck):
         if issues:
             return self._result(
                 CheckStatus.WARN,
-                actual=f"Policy '{best.get('Name', '?')}' enabled but: {'; '.join(issues)}",
+                self.expected,
+                f"Policy '{best.get('Name', '?')}' enabled but: {'; '.join(issues)}",
                 notes="Review Safe Links settings in Microsoft Defender portal.",
             )
 
         return self._result(
             CheckStatus.PASS,
-            actual=(
-                f"Policy '{best.get('Name', '?')}': URL scanning on, click tracking on, "
-                "click-through disabled"
-            ),
+            self.expected,
+            f"Policy '{best.get('Name', '?')}': URL scanning on, click tracking on, click-through disabled",
         )
 
 
@@ -442,7 +479,6 @@ class CheckSafeAttachments(BaseCheck):
     )
     reference = "CIS M365 v3.1 §3.2.3"
 
-    # Actions considered compliant by CIS
     GOOD_ACTIONS = {"Block", "DynamicDelivery", "Replace"}
 
     def run(self, ctx: PolicyContext) -> CheckResult:
@@ -450,7 +486,8 @@ class CheckSafeAttachments(BaseCheck):
             ps_error = ctx.exchange_ps.error if ctx.exchange_ps else "Exchange PS not run"
             return self._result(
                 CheckStatus.MANUAL,
-                actual=f"Exchange Online PS unavailable: {ps_error}",
+                self.expected,
+                f"Exchange Online PS unavailable: {ps_error}",
                 notes=self.manual_steps,
             )
 
@@ -458,34 +495,35 @@ class CheckSafeAttachments(BaseCheck):
         if not policies:
             return self._result(
                 CheckStatus.FAIL,
-                actual="No Safe Attachments policies found",
+                self.expected,
+                "No Safe Attachments policies found",
             )
 
         enabled = [p for p in policies if p.get("Enable") is True]
         if not enabled:
             return self._result(
                 CheckStatus.FAIL,
-                actual=f"No enabled Safe Attachments policies ({len(policies)} found)",
+                self.expected,
+                f"No enabled Safe Attachments policies ({len(policies)} found)",
             )
 
-        bad = [
-            p for p in enabled
-            if p.get("Action", "") not in self.GOOD_ACTIONS
-        ]
+        bad = [p for p in enabled if p.get("Action", "") not in self.GOOD_ACTIONS]
         if bad:
             bad_names = ", ".join(
                 f"{p.get('Name','?')} (Action={p.get('Action','?')})" for p in bad
             )
             return self._result(
                 CheckStatus.WARN,
-                actual=f"Safe Attachments enabled but action is not Block/DynamicDelivery: {bad_names}",
+                self.expected,
+                f"Safe Attachments enabled but action is not Block/DynamicDelivery: {bad_names}",
                 notes="Set Action to Block or Dynamic Delivery for full protection.",
             )
 
         best = enabled[0]
         return self._result(
             CheckStatus.PASS,
-            actual=f"Policy '{best.get('Name', '?')}': enabled, Action={best.get('Action', '?')}",
+            self.expected,
+            f"Policy '{best.get('Name', '?')}': enabled, Action={best.get('Action', '?')}",
         )
 
 
@@ -531,7 +569,8 @@ class CheckAutoExternalForwarding(BaseCheck):
             ps_error = ctx.exchange_ps.error if ctx.exchange_ps else "Exchange PS not run"
             return self._result(
                 CheckStatus.MANUAL,
-                actual=f"Exchange Online PS unavailable: {ps_error}",
+                self.expected,
+                f"Exchange Online PS unavailable: {ps_error}",
                 notes=self.manual_steps,
             )
 
@@ -539,7 +578,8 @@ class CheckAutoExternalForwarding(BaseCheck):
         if not policies:
             return self._result(
                 CheckStatus.MANUAL,
-                actual="No outbound spam policies returned — verify manually",
+                self.expected,
+                "No outbound spam policies returned — verify manually",
                 notes=self.manual_steps,
             )
 
@@ -547,7 +587,6 @@ class CheckAutoExternalForwarding(BaseCheck):
             p for p in policies
             if p.get("AutoForwardingMode", "").lower() not in ("off", "automatic")
         ]
-        # "Automatic" means "use MX record / tenant setting" — still not explicitly Off
         automatic = [
             p for p in policies
             if p.get("AutoForwardingMode", "").lower() == "automatic"
@@ -560,21 +599,24 @@ class CheckAutoExternalForwarding(BaseCheck):
             )
             return self._result(
                 CheckStatus.FAIL,
-                actual=f"Forwarding allowed by: {bad}",
+                self.expected,
+                f"Forwarding allowed by: {bad}",
             )
 
         if automatic:
             auto_names = ", ".join(p.get("Name", "?") for p in automatic)
             return self._result(
                 CheckStatus.WARN,
-                actual=f"AutoForwardingMode=Automatic (not explicitly Off) on: {auto_names}",
+                self.expected,
+                f"AutoForwardingMode=Automatic (not explicitly Off) on: {auto_names}",
                 notes="CIS recommends explicitly setting AutoForwardingMode=Off.",
             )
 
         off_names = ", ".join(p.get("Name", "?") for p in policies)
         return self._result(
             CheckStatus.PASS,
-            actual=f"All policies have AutoForwardingMode=Off: {off_names}",
+            self.expected,
+            f"All policies have AutoForwardingMode=Off: {off_names}",
         )
 
 
@@ -614,7 +656,8 @@ class CheckExternalSenderWarning(BaseCheck):
             ps_error = ctx.exchange_ps.error if ctx.exchange_ps else "Exchange PS not run"
             return self._result(
                 CheckStatus.MANUAL,
-                actual=f"Exchange Online PS unavailable: {ps_error}",
+                self.expected,
+                f"Exchange Online PS unavailable: {ps_error}",
                 notes=self.manual_steps,
             )
 
@@ -622,27 +665,37 @@ class CheckExternalSenderWarning(BaseCheck):
         if not eio:
             return self._result(
                 CheckStatus.MANUAL,
-                actual="ExternalInOutlook data not returned — verify manually",
+                self.expected,
+                "ExternalInOutlook data not returned — verify manually",
                 notes=self.manual_steps,
             )
 
-        # Check for errors from the PS script
         if "Error" in eio and eio["Error"]:
             return self._result(
                 CheckStatus.MANUAL,
-                actual=f"Get-ExternalInOutlook error: {eio['Error']}",
+                self.expected,
+                f"Get-ExternalInOutlook error: {eio['Error']}",
                 notes=self.manual_steps,
             )
 
         enabled = eio.get("Enabled")
         if enabled is True:
-            return self._result(CheckStatus.PASS, actual="External In Outlook is enabled")
+            return self._result(
+                CheckStatus.PASS,
+                self.expected,
+                "External In Outlook is enabled",
+            )
         if enabled is False:
-            return self._result(CheckStatus.FAIL, actual="External In Outlook is disabled")
+            return self._result(
+                CheckStatus.FAIL,
+                self.expected,
+                "External In Outlook is disabled",
+            )
 
         return self._result(
             CheckStatus.MANUAL,
-            actual="External In Outlook state unknown — verify manually",
+            self.expected,
+            "External In Outlook state unknown — verify manually",
             notes=self.manual_steps,
         )
 
