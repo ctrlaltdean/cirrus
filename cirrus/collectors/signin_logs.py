@@ -55,13 +55,14 @@ class SignInLogsCollector(GraphCollector):
             "$filter": " and ".join(filters),
             "$top": 999,
             "$orderby": "createdDateTime desc",
+            "$count": "true",  # required when combining $filter + $orderby on signIns
             "$select": (
                 "id,createdDateTime,userDisplayName,userPrincipalName,userId,"
                 "appDisplayName,appId,ipAddress,location,clientAppUsed,"
                 "conditionalAccessStatus,isInteractive,"
                 "riskDetail,riskEventTypes,riskLevelAggregated,riskLevelDuringSignIn,"
                 "riskState,status,deviceDetail,authenticationDetails,"
-                "authenticationRequirement,homeTenantId,resourceDisplayName,resourceId,"
+                "authenticationRequirement,resourceDisplayName,resourceId,"
                 "tokenIssuerType,networkLocationDetails"
             ),
         }
