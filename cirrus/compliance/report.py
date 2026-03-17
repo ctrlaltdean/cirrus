@@ -68,9 +68,9 @@ def render_terminal(report: ComplianceReport, tenant: str) -> None:
         )
         table.add_column("Control", style="dim", width=14, no_wrap=True)
         table.add_column("L", justify="center", width=3)
-        table.add_column("Title", min_width=35)
-        table.add_column("Expected", min_width=20)
-        table.add_column("Actual", min_width=20)
+        table.add_column("Title", ratio=3, overflow="fold")
+        table.add_column("Expected", ratio=2, overflow="fold")
+        table.add_column("Actual", ratio=3, overflow="fold")
         table.add_column("Status", justify="center", width=12)
 
         for r in sorted(results, key=lambda x: x.control_id):
@@ -82,8 +82,8 @@ def render_terminal(report: ComplianceReport, tenant: str) -> None:
                 r.control_id,
                 Text(str(r.level), style=level_style),
                 r.title,
-                _truncate(r.expected, 40),
-                _truncate(r.actual, 40),
+                r.expected,
+                r.actual,
                 status_text,
             )
 
@@ -108,7 +108,8 @@ def render_terminal(report: ComplianceReport, tenant: str) -> None:
             console.print(f"\n  [{color}]{label}[/{color}] [bold]{r.control_id}[/bold] — {r.title}")
             console.print(f"  [dim]Actual:[/dim] {r.actual}")
             if r.remediation:
-                for line in textwrap.wrap(r.remediation, width=90):
+                wrap_width = max(60, console.width - 12)
+                for line in textwrap.wrap(r.remediation, width=wrap_width):
                     console.print(f"  [dim]Fix:[/dim] {line}")
 
     # Print MANUAL checks with instructions
@@ -212,5 +213,3 @@ def _write_text_report(report: ComplianceReport, path: Path, tenant: str) -> Non
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _truncate(text: str, max_len: int) -> str:
-    return text if len(text) <= max_len else text[: max_len - 3] + "..."

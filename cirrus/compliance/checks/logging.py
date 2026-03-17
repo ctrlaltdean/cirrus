@@ -178,54 +178,120 @@ class CheckAuditLogRetention(BaseCheck):
     GOOD_DURATIONS = {"TenYears", "SevenYears", "FiveYears", "ThreeYears", "OneYear"}
     WARN_DURATIONS = {"SixMonths", "ThreeMonths", "OneMonth"}
 
-    def run(self, ctx: PolicyContext) -> CheckResult:
-        ps = ctx.exchange_ps
-        if not ps or not ps.available:
-            ps_error = ps.error if ps else "Exchange PS not run"
-            return self._result(
-                CheckStatus.MANUAL, self.expected,
-                f"Exchange Online PS unavailable: {ps_error}",
-                notes=self.manual_steps,
-            )
+    # SKU part numbers that provide 1-year default UAL retention (E3/E5/EXO Plan 2)
+    ONE_YEAR_SKUS = {
+        "ENTERPRISEPACK",              # Office 365 E3
+        "ENTERPRISEPREMIUM",           # Office 365 E5
+        "ENTERPRISEPREMIUM_NOPSTNCONF",# Office 365 E5 (no audio conf)
+        "SPE_E3",                      # Microsoft 365 E3
+        "SPE_E5",                      # Microsoft 365 E5
+        "M365_E3",                     # Microsoft 365 E3 (alt SKU)
+        "M365_E5",                     # Microsoft 365 E5 (alt SKU)
+        "EXCHANGEENTERPRISE",          # Exchange Online Plan 2
+        "EXCHANGEENTERPRISE_FAILOVER", # Exchange Online Plan 2 failover
+    }
+    # SKU part numbers with 90-day default (E1/F/Business)
+    NINETY_DAY_SKUS = {
+        "STANDARDPACK",               # Office 365 E1
+        "EXCHANGESTANDARD",           # Exchange Online Plan 1
+        "O365_BUSINESS_ESSENTIALS",   # Microsoft 365 Business Basic
+        "O365_BUSINESS_PREMIUM",      # Microsoft 365 Business Standard
+        "SPB",                        # Microsoft 365 Business Premium
+        "M365_F1",                    # Microsoft 365 F1
+        "M365_F3",                    # Microsoft 365 F3
+        "DESKLESSPACK",               # Office 365 F1 (K1)
+    }
 
-        policies = ps.audit_retention_policies
-        if not policies:
-            return self._result(
-                CheckStatus.MANUAL, self.expected,
-                "No audit retention policies returned (IPPS may not be accessible or no policies configured)",
-                notes=self.manual_steps,
-            )
+    def _infer_from_license(self, ctx: PolicyContext) -> CheckResult | None:
+        """
+        Infer default UAL retention from subscribed SKUs.
+        Returns a CheckResult if license data is conclusive, else None.
+        """
+        active_skus = {
+            sku.get("skuPartNumber", "")
+            for sku in ctx.subscribed_skus
+            if sku.get("capabilityStatus", "").lower() == "enabled"
+        }
+        if not active_skus:
+            return None
 
-        # Check if any policy has an error
-        if len(policies) == 1 and ("Error" in policies[0] or "ConnectError" in policies[0]):
-            err = policies[0].get("Error") or policies[0].get("ConnectError", "unknown error")
-            return self._result(
-                CheckStatus.MANUAL, self.expected,
-                f"IPPS connection unavailable: {err}",
-                notes=self.manual_steps,
-            )
-
-        good = [p for p in policies if p.get("RetentionDuration") in self.GOOD_DURATIONS]
-        warn = [p for p in policies if p.get("RetentionDuration") in self.WARN_DURATIONS]
-
-        if good:
-            best = max(good, key=lambda p: list(self.GOOD_DURATIONS).index(p.get("RetentionDuration", "OneYear")) if p.get("RetentionDuration") in self.GOOD_DURATIONS else 99)
+        if active_skus & self.ONE_YEAR_SKUS:
+            matched = sorted(active_skus & self.ONE_YEAR_SKUS)
             return self._result(
                 CheckStatus.PASS, self.expected,
-                f"{len(good)} policy/policies with ≥1 year retention. Best: '{best.get('Name','?')}' ({best.get('RetentionDuration','?')})",
+                f"License provides 1-year default UAL retention: {', '.join(matched)}",
+                notes="Default 1-year retention confirmed by license tier. "
+                      "Custom retention policies (via Purview) can extend to 10 years.",
             )
 
-        if warn:
-            durations = ", ".join(f"{p.get('Name','?')}={p.get('RetentionDuration','?')}" for p in warn)
+        if active_skus & self.NINETY_DAY_SKUS:
+            matched = sorted(active_skus & self.NINETY_DAY_SKUS)
             return self._result(
                 CheckStatus.WARN, self.expected,
-                f"Retention policies found but below 1 year: {durations}",
-                notes="CIS recommends at least 1 year retention. E3/E5 provide 1-year default.",
+                f"License provides 90-day default UAL retention only: {', '.join(matched)}",
+                notes="Upgrade to E3/E5 or add a Microsoft Purview audit retention policy "
+                      "to meet the 1-year CIS recommendation.",
             )
+        return None
 
+    def run(self, ctx: PolicyContext) -> CheckResult:
+        ps = ctx.exchange_ps
+
+        # --- Path 1: IPPS explicit retention policies (most authoritative) ---
+        if ps and ps.available and ps.audit_retention_policies:
+            policies = ps.audit_retention_policies
+
+            # IPPS connected but returned an error object
+            if len(policies) == 1 and ("Error" in policies[0] or "ConnectError" in policies[0]):
+                err = policies[0].get("Error") or policies[0].get("ConnectError", "unknown error")
+                # Fall through to license inference rather than immediately going MANUAL
+                license_result = self._infer_from_license(ctx)
+                if license_result:
+                    license_result.notes = (
+                        f"IPPS unavailable ({err}); result inferred from license. "
+                        + (license_result.notes or "")
+                    )
+                    return license_result
+                return self._result(
+                    CheckStatus.MANUAL, self.expected,
+                    f"IPPS connection unavailable: {err}",
+                    notes=self.manual_steps,
+                )
+
+            good = [p for p in policies if p.get("RetentionDuration") in self.GOOD_DURATIONS]
+            warn = [p for p in policies if p.get("RetentionDuration") in self.WARN_DURATIONS]
+
+            if good:
+                best = max(
+                    good,
+                    key=lambda p: list(self.GOOD_DURATIONS).index(p["RetentionDuration"])
+                    if p.get("RetentionDuration") in self.GOOD_DURATIONS else 99,
+                )
+                return self._result(
+                    CheckStatus.PASS, self.expected,
+                    f"{len(good)} retention policy/policies ≥1 year. "
+                    f"Best: '{best.get('Name','?')}' ({best.get('RetentionDuration','?')})",
+                )
+            if warn:
+                durations = ", ".join(
+                    f"{p.get('Name','?')}={p.get('RetentionDuration','?')}" for p in warn
+                )
+                return self._result(
+                    CheckStatus.WARN, self.expected,
+                    f"Retention policies found but all below 1 year: {durations}",
+                    notes="CIS recommends at least 1 year. E3/E5 provide 1-year default.",
+                )
+
+        # --- Path 2: License-based inference ---
+        license_result = self._infer_from_license(ctx)
+        if license_result:
+            return license_result
+
+        # --- Path 3: No data available ---
+        ps_error = ps.error if (ps and not ps.available) else "Exchange PS not run"
         return self._result(
             CheckStatus.MANUAL, self.expected,
-            f"{len(policies)} retention policy/policies found but retention duration not recognized — verify manually",
+            f"Could not determine retention — PS unavailable ({ps_error}) and license not recognized",
             notes=self.manual_steps,
         )
 
