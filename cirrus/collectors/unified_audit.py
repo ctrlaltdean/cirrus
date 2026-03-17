@@ -31,8 +31,8 @@ from typing import Any
 
 from cirrus.collectors.base import GRAPH_BETA, CollectorError, GraphCollector
 
-POLL_INTERVAL = 5   # seconds between status checks
-POLL_TIMEOUT = 600  # seconds before giving up on the async job
+POLL_INTERVAL = 5    # seconds between status checks
+POLL_TIMEOUT = 1800  # seconds before giving up — large tenants can take 20-30 min
 
 
 class UnifiedAuditCollector(GraphCollector):

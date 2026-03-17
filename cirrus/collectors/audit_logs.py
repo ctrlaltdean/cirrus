@@ -64,5 +64,11 @@ class AuditLogsCollector(GraphCollector):
             ),
         }
 
+        # Nested property filters (initiatedBy/user/userPrincipalName) require
+        # advanced query support: ConsistencyLevel header (set globally) + $count=true.
+        # Without $count, combining a nested filter with $orderby can return 400.
+        if users:
+            params["$count"] = "true"
+
         records = self._collect_all(f"{GRAPH_BASE}/auditLogs/directoryAudits", params)
         return records

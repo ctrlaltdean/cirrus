@@ -66,17 +66,16 @@ class RiskyUsersCollector(GraphCollector):
         if filters:
             params["$filter"] = " and ".join(filters)
 
-        records = self._collect_all(f"{GRAPH_BASE}/identityProtection/riskyUsers", params)
-
-        # If user filter was provided, filter client-side (UPN filter not supported server-side)
+        # Server-side UPN filter requires advanced queries (ConsistencyLevel header
+        # already set globally). Apply it here to avoid fetching all risky users
+        # when we only need a subset.
         if users:
-            upn_set = {u.lower() for u in users}
-            records = [
-                r for r in records
-                if r.get("userPrincipalName", "").lower() in upn_set
-            ]
+            upn_filter = " or ".join(f"userPrincipalName eq '{u}'" for u in users)
+            existing = params.get("$filter", "")
+            params["$filter"] = f"({existing}) and ({upn_filter})" if existing else f"({upn_filter})"
+            params["$count"] = "true"
 
-        return records
+        return self._collect_all(f"{GRAPH_BASE}/identityProtection/riskyUsers", params)
 
 
 class RiskySignInsCollector(GraphCollector):
@@ -111,7 +110,7 @@ class RiskySignInsCollector(GraphCollector):
                 "id,createdDateTime,userDisplayName,userPrincipalName,userId,"
                 "ipAddress,location,riskDetail,riskEventTypes,riskEventTypes_v2,"
                 "riskLevelAggregated,riskLevelDuringSignIn,riskState,status,"
-                "deviceDetail,clientAppUsed,appDisplayName"
+                "deviceDetail,clientAppUsed"
             ),
             "$top": 999,
             "$orderby": "createdDateTime desc",
