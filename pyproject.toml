@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "cirrus"
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cirrus = "cirrus.cli:app"
+cirrus = "cirrus.cli:main"
 
 [project.optional-dependencies]
 dev = [
