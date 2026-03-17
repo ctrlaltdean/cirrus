@@ -1,0 +1,5 @@
+typer>=0.12
+rich>=13
+msal>=1.28
+requests>=2.31
+pydantic>=2.0

@@ -1,0 +1,112 @@
+name: Build CIRRUS Executables
+
+on:
+  push:
+    tags:
+      - "v*"          # Trigger on version tags: v0.1.0, v1.0.0, etc.
+  workflow_dispatch:  # Allow manual trigger from GitHub Actions UI
+
+permissions:
+  contents: write   # Needed to create GitHub Releases
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: cirrus.exe
+            asset_name: cirrus-windows-x64.exe
+          - os: macos-latest
+            artifact_name: cirrus
+            asset_name: cirrus-macos-x64
+          - os: ubuntu-latest
+            artifact_name: cirrus
+            asset_name: cirrus-linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build standalone executable with PyInstaller
+        run: pyinstaller cirrus.spec
+
+      - name: Verify executable runs
+        run: |
+          ./dist/${{ matrix.artifact_name }} version
+        shell: bash
+
+      - name: Compute SHA-256 of executable
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            sha256sum dist/${{ matrix.artifact_name }} > dist/${{ matrix.asset_name }}.sha256
+          else
+            shasum -a 256 dist/${{ matrix.artifact_name }} > dist/${{ matrix.asset_name }}.sha256
+          fi
+
+      - name: Rename artifact for release
+        shell: bash
+        run: |
+          cp dist/${{ matrix.artifact_name }} dist/${{ matrix.asset_name }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            dist/${{ matrix.asset_name }}
+            dist/${{ matrix.asset_name }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "CIRRUS ${{ github.ref_name }}"
+          body: |
+            ## CIRRUS ${{ github.ref_name }}
+
+            ### Downloads
+            | Platform | File | SHA-256 |
+            |----------|------|---------|
+            | Windows  | cirrus-windows-x64.exe | see .sha256 file |
+            | macOS    | cirrus-macos-x64       | see .sha256 file |
+            | Linux    | cirrus-linux-x64       | see .sha256 file |
+
+            ### Quick Start
+            ```
+            # Windows
+            cirrus-windows-x64.exe auth login --tenant yourtenant.com
+            cirrus-windows-x64.exe run bec --tenant yourtenant.com --user user@yourtenant.com
+
+            # macOS / Linux
+            chmod +x cirrus-macos-x64
+            ./cirrus-macos-x64 auth login --tenant yourtenant.com
+            ./cirrus-macos-x64 run bec --tenant yourtenant.com --user user@yourtenant.com
+            ```
+          files: |
+            dist/**/*
+          draft: false
+          prerelease: false
