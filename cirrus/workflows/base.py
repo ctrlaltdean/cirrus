@@ -18,6 +18,7 @@ from rich.table import Table
 from cirrus.collectors.base import CollectorError, GraphCollector
 from cirrus.output.case import Case
 from cirrus.output.writer import save_collection
+from cirrus.utils.license import TenantLicenseProfile
 
 console = Console()
 
@@ -100,6 +101,17 @@ class BaseWorkflow:
             {"tenant": tenant, "users": users or "all", "days": days},
         )
 
+        # ------------------------------------------------------------------ #
+        # License pre-check — fetch once, inject into every collector         #
+        # ------------------------------------------------------------------ #
+        import requests as _requests
+        _probe_session = _requests.Session()
+        _probe_session.headers.update(
+            {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
+        )
+        license_profile = TenantLicenseProfile.fetch(_probe_session)
+        _render_license_banner(license_profile)
+
         steps = self._build_steps(users=users, days=days, **params)
 
         with Progress(
@@ -113,6 +125,7 @@ class BaseWorkflow:
             for collector_cls, collector_kwargs, display_name in steps:
                 task = progress.add_task(display_name, total=None)
                 collector: GraphCollector = collector_cls(self.token)
+                collector.license_profile = license_profile
 
                 self.case.audit.log_collection_start(
                     collector.name,
@@ -174,6 +187,27 @@ class BaseWorkflow:
         raise NotImplementedError
 
 
+def _render_license_banner(profile: TenantLicenseProfile) -> None:
+    """Print a compact license profile banner before collection starts."""
+    parts: list[str] = []
+    for label, available, skipped in profile.summary_rows():
+        if available:
+            parts.append(f"{label} [green]✓[/green]")
+        else:
+            parts.append(f"{label} [red]✗[/red]")
+
+    console.print("\n[bold]Tenant license profile:[/bold]  " + "   ".join(parts))
+
+    for label, available, skipped in profile.summary_rows():
+        if not available and skipped:
+            names = ", ".join(skipped)
+            console.print(
+                f"  [dim]↳ {label} not found — {names} will be skipped[/dim]"
+            )
+
+    console.print()
+
+
 def render_summary(result: WorkflowResult) -> None:
     """Print a Rich summary table after workflow completion."""
     table = Table(
@@ -188,7 +222,11 @@ def render_summary(result: WorkflowResult) -> None:
     table.add_column("Status", justify="center")
 
     for r in result.results:
-        if r.error:
+        if r.error and r.error.startswith("Skipped:"):
+            status = "[yellow]SKIPPED[/yellow]"
+            records_str = "-"
+            ioc_str = "-"
+        elif r.error:
             status = "[red]FAILED[/red]"
             records_str = "-"
             ioc_str = "-"

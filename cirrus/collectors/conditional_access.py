@@ -29,6 +29,11 @@ class ConditionalAccessCollector(GraphCollector):
         Collect all Conditional Access policies.
         Returns list of policy dicts annotated with IOC flags.
         """
+        self._require_license(
+            "p1",
+            "Conditional Access policies require Entra ID P1 or higher.",
+        )
+
         policies = self._collect_all(
             f"{GRAPH_BASE}/identity/conditionalAccess/policies",
             params={

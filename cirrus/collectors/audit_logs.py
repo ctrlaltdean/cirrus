@@ -44,6 +44,11 @@ class AuditLogsCollector(GraphCollector):
 
         Returns list of audit event dicts.
         """
+        self._require_license(
+            "p1",
+            "Directory audit logs (/auditLogs/directoryAudits) require Entra ID P1 or higher.",
+        )
+
         since = days_ago_filter(days)
         filters = [f"activityDateTime ge {since}"]
 

@@ -12,9 +12,12 @@ All collectors inherit from GraphCollector. It handles:
 from __future__ import annotations
 
 import time
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 import requests
+
+if TYPE_CHECKING:
+    from cirrus.utils.license import TenantLicenseProfile
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 GRAPH_BETA = "https://graph.microsoft.com/beta"
@@ -51,6 +54,9 @@ class GraphCollector:
                 "ConsistencyLevel": "eventual",  # needed for $count and advanced filters
             }
         )
+        #: Pre-fetched license profile. Set by the workflow before collection
+        #: starts. If None, _require_license() performs a lazy fetch on first use.
+        self.license_profile: TenantLicenseProfile | None = None
 
     # ------------------------------------------------------------------
     # Low-level HTTP helpers
@@ -163,22 +169,24 @@ class GraphCollector:
             records.extend(page.get("value", []))
         return records
 
-    def _has_p2_license(self) -> bool:
-        """Return True if the tenant has at least one active Entra ID P2 service plan."""
-        try:
-            data = self._get(
-                f"{GRAPH_BASE}/subscribedSkus",
-                params={"$select": "servicePlans,capabilityStatus"},
-            )
-            for sku in data.get("value", []):
-                if sku.get("capabilityStatus", "").lower() != "enabled":
-                    continue
-                for plan in sku.get("servicePlans", []):
-                    if plan.get("servicePlanId") == _P2_SERVICE_PLAN_ID:
-                        return True
-            return False
-        except Exception:
-            return True  # assume available; let the actual API call surface the real error
+    def _require_license(self, feature: str, detail: str) -> None:
+        """
+        Raise CollectorError if *feature* is not licensed on the tenant.
+
+        Uses a pre-fetched TenantLicenseProfile when available (set by the
+        workflow orchestrator), otherwise performs a lazy fetch and caches it.
+
+        Args:
+            feature: One of "p1", "p2", "exchange", "advanced_auditing".
+            detail:  Human-readable message used in the CollectorError.
+        """
+        from cirrus.utils.license import TenantLicenseProfile
+
+        if self.license_profile is None:
+            self.license_profile = TenantLicenseProfile.fetch(self.session)
+
+        if not self.license_profile.allows(feature):
+            raise CollectorError(f"Skipped: {detail}")
 
     def collect(self, **kwargs: Any) -> list[dict]:
         """

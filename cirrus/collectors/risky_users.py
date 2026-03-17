@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from cirrus.collectors.base import GRAPH_BASE, CollectorError, GraphCollector
+from cirrus.collectors.base import GRAPH_BASE, GraphCollector
 from cirrus.utils.helpers import days_ago_filter
 
 
@@ -50,12 +50,11 @@ class RiskyUsersCollector(GraphCollector):
 
         Returns list of risky user dicts.
         """
-        if not self._has_p2_license():
-            raise CollectorError(
-                "Skipped: Entra ID P2 license not found on this tenant. "
-                "Identity Protection (riskyUsers) requires Microsoft 365 E5 or "
-                "Entra ID P2. This tenant appears to be licensed at P1 only."
-            )
+        self._require_license(
+            "p2",
+            "Identity Protection (riskyUsers) requires Entra ID P2 or Microsoft 365 E5. "
+            "This tenant appears to be licensed at P1 only.",
+        )
 
         filters: list[str] = []
 
@@ -102,12 +101,11 @@ class RiskySignInsCollector(GraphCollector):
 
         Returns list of risky sign-in dicts.
         """
-        if not self._has_p2_license():
-            raise CollectorError(
-                "Skipped: Entra ID P2 license not found on this tenant. "
-                "Identity Protection (riskySignIns) requires Microsoft 365 E5 or "
-                "Entra ID P2. This tenant appears to be licensed at P1 only."
-            )
+        self._require_license(
+            "p2",
+            "Identity Protection (riskySignIns) requires Entra ID P2 or Microsoft 365 E5. "
+            "This tenant appears to be licensed at P1 only.",
+        )
 
         since = days_ago_filter(days)
         filters = [f"createdDateTime ge {since}"]

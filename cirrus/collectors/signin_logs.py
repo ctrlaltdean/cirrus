@@ -42,6 +42,11 @@ class SignInLogsCollector(GraphCollector):
 
         Returns list of sign-in event dicts.
         """
+        self._require_license(
+            "p1",
+            "Sign-in logs (/auditLogs/signIns) require Entra ID P1 or higher.",
+        )
+
         since = days_ago_filter(days)
         filters = [f"createdDateTime ge {since}"]
 
