@@ -57,11 +57,10 @@ class SignInLogsCollector(GraphCollector):
             "$select": (
                 "id,createdDateTime,userDisplayName,userPrincipalName,userId,"
                 "appDisplayName,appId,ipAddress,location,clientAppUsed,"
-                "conditionalAccessStatus,isInteractive,"
-                "riskDetail,riskEventTypes,riskLevelAggregated,riskLevelDuringSignIn,"
-                "riskState,status,deviceDetail,authenticationDetails,"
-                "authenticationRequirement,resourceDisplayName,resourceId,"
-                "tokenIssuerType,networkLocationDetails"
+                "conditionalAccessStatus,isInteractive,correlationId,"
+                "riskDetail,riskEventTypes_v2,riskLevelAggregated,riskLevelDuringSignIn,"
+                "riskState,status,deviceDetail,"
+                "resourceDisplayName,resourceId,tokenIssuerType"
             ),
         }
 
