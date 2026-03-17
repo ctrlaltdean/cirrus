@@ -21,6 +21,7 @@ CIRRUS is a command-line tool for collecting forensic artifacts from Microsoft 3
   - [Authentication](#authentication)
   - [Investigation Workflows](#investigation-workflows)
   - [Compliance Audit](#compliance-audit)
+  - [Dependency Management](#dependency-management)
   - [Case Management](#case-management)
 - [Output Structure](#output-structure)
 - [IOC Flags](#ioc-flags)
@@ -252,6 +253,8 @@ Case name (leave blank for auto-generated):
 Ready to run. Proceed? [Y/n]:
 ```
 
+> **Note:** Before authenticating, CIRRUS checks for optional PowerShell module dependencies (`ExchangeOnlineManagement`, `MicrosoftTeams`, `Microsoft.Online.SharePoint.PowerShell`) and shows their status. Missing modules fall back to manual instructions — they are not required to run the audit.
+
 #### Direct Flags (Scripted / Automated)
 
 ```bash
@@ -284,17 +287,44 @@ cirrus run audit --tenant contoso.com --benchmark all --level 1 --no-save
   Summary:  14 PASS  7 FAIL  3 WARN  14 MANUAL  0 ERROR
 ```
 
+> **Checks total 34.** The wizard prompt shows the actual count for the selected benchmark and level combination.
+
 #### CIS Controls Coverage
 
-| Section | Automated | Manual | Total |
-|---------|-----------|--------|-------|
+All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell modules (`ExchangeOnlineManagement`, `MicrosoftTeams`, `Microsoft.Online.SharePoint.PowerShell`) when available and fall back to step-by-step manual instructions if the module is not installed or authentication fails.
+
+| Section | Graph API | Hybrid (PS/DNS) | Total |
+|---------|-----------|-----------------|-------|
 | 1 — Identity & Access Management | 10 | 1 | 11 |
 | 2 — M365 Administration | 5 | 0 | 5 |
 | 3 — Exchange Online | 0 | 8 | 8 |
 | 4 — Microsoft Teams | 0 | 3 | 3 |
 | 5 — SharePoint & OneDrive | 0 | 3 | 3 |
-| 6 — Logging & Monitoring | 1 | 3 | 4 |
-| **Total** | **16** | **18** | **34** |
+| 6 — Logging & Monitoring | 0 | 4 | 4 |
+| **Total** | **15** | **19** | **34** |
+
+---
+
+### Dependency Management
+
+CIRRUS checks PowerShell module availability automatically before each compliance audit. You can also check and install dependencies manually:
+
+```bash
+# Show status of all optional PowerShell modules and dnspython
+cirrus deps check
+
+# Install any missing dependencies (prompts for confirmation)
+cirrus deps install
+```
+
+| Dependency | Purpose | Required? |
+|------------|---------|-----------|
+| `ExchangeOnlineManagement` | Automates Exchange, DKIM, UAL, and logging checks | Optional |
+| `MicrosoftTeams` | Automates Teams external access, guest, and meeting checks | Optional |
+| `Microsoft.Online.SharePoint.PowerShell` | Automates SharePoint sharing and legacy auth checks | Optional |
+| `dnspython` | DNS-based DMARC / SPF checks | Optional |
+
+Missing modules are installed via `Install-Module` (PowerShell Gallery) for PS modules and `pip` for Python packages.
 
 ---
 
@@ -390,7 +420,10 @@ If any entry has been modified after the fact, the hash chain will fail and CIRR
 - [ ] HTML investigation report with timeline visualization
 - [ ] SIEM export (CEF, Splunk HEC, Microsoft Sentinel)
 - [ ] Additional detection / analysis rules
-- [ ] Teams and SharePoint automated checks (currently manual)
+- [x] Exchange Online automated checks (PS batch via `ExchangeOnlineManagement`)
+- [x] Teams automated checks (PS batch via `MicrosoftTeams`)
+- [x] SharePoint automated checks (PS batch via `Microsoft.Online.SharePoint.PowerShell`)
+- [x] Audit log retention automation (IPPS policy query + license-tier inference)
 
 ---
 
