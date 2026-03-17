@@ -54,14 +54,6 @@ class SignInLogsCollector(GraphCollector):
         params: dict[str, Any] = {
             "$filter": " and ".join(filters),
             "$top": 999,
-            "$select": (
-                "id,createdDateTime,userDisplayName,userPrincipalName,userId,"
-                "appDisplayName,appId,ipAddress,location,clientAppUsed,"
-                "conditionalAccessStatus,isInteractive,correlationId,"
-                "riskDetail,riskEventTypes_v2,riskLevelAggregated,riskLevelDuringSignIn,"
-                "riskState,status,deviceDetail,"
-                "resourceDisplayName,resourceId,tokenIssuerType"
-            ),
         }
 
         records = self._collect_all(f"{GRAPH_BASE}/auditLogs/signIns", params)
