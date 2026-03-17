@@ -134,6 +134,8 @@ CIRRUS uses delegated (interactive login) permissions. The account used to authe
 
 CIRRUS caches tokens per tenant in `~/.cirrus/token_cache.json`. You only need to log in once per tenant per session.
 
+Authentication opens a **private/incognito browser window** automatically (Edge InPrivate → Chrome Incognito → Firefox Private → system default). This prevents Microsoft SSO session bleed between tenants when working multi-tenant engagements — each prompt starts with a clean session.
+
 ```bash
 # Authenticate to a tenant (opens browser)
 cirrus auth login --tenant contoso.com

@@ -13,6 +13,8 @@ from pathlib import Path
 
 import msal
 
+from cirrus.auth.private_browser import private_browser_auth
+
 # Default: Microsoft Graph Command Line Tools (pre-registered, broad delegated perms)
 DEFAULT_CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 
@@ -80,10 +82,11 @@ def get_token(tenant_id: str, client_id: str = DEFAULT_CLIENT_ID, force_refresh:
             result = app.acquire_token_silent(GRAPH_SCOPES, account=accounts[0])
 
     if not result:
-        result = app.acquire_token_interactive(
-            scopes=GRAPH_SCOPES,
-            prompt="select_account",
-        )
+        with private_browser_auth():
+            result = app.acquire_token_interactive(
+                scopes=GRAPH_SCOPES,
+                prompt="select_account",
+            )
 
     _save_cache(cache)
 

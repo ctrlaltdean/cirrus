@@ -33,6 +33,7 @@ a = Analysis(
         # cirrus — core
         "cirrus",
         "cirrus.auth.authenticator",
+        "cirrus.auth.private_browser",
         "cirrus.audit.logger",
         "cirrus.output.case",
         "cirrus.output.writer",
