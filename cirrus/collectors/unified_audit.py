@@ -110,10 +110,14 @@ class UnifiedAuditCollector(GraphCollector):
         if self.on_status:
             self.on_status("query submitted — waiting for results")
 
-        # Poll for completion
+        # Poll for completion using wall-clock time so API latency is included.
         status_url = f"{GRAPH_BETA}/security/auditLog/queries/{query_id}"
-        elapsed = 0
-        while elapsed < POLL_TIMEOUT:
+        poll_start = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - poll_start
+            if elapsed >= POLL_TIMEOUT:
+                break
+
             status_data = self._get(status_url)
             status = status_data.get("status", "").lower()
 
@@ -125,13 +129,21 @@ class UnifiedAuditCollector(GraphCollector):
                 )
 
             if self.on_status:
-                mins, secs = divmod(elapsed, 60)
+                mins, secs = divmod(int(elapsed), 60)
                 elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-                self.on_status(f"query {status or 'running'} — {elapsed_str} elapsed")
+                if status == "notstarted":
+                    self.on_status(
+                        f"query queued on Microsoft's servers — {elapsed_str} elapsed "
+                        f"(this is normal, waiting for processing to begin)"
+                    )
+                else:
+                    self.on_status(
+                        f"query {status or 'running'} — {elapsed_str} elapsed"
+                    )
 
             time.sleep(POLL_INTERVAL)
-            elapsed += POLL_INTERVAL
 
+        elapsed = time.monotonic() - poll_start
         if elapsed >= POLL_TIMEOUT:
             raise CollectorError(
                 f"UAL query {query_id} timed out after {POLL_TIMEOUT}s. "
