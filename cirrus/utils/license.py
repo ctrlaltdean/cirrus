@@ -48,7 +48,8 @@ _GATES = {
 # Informational notes shown when a feature is absent but still attempted
 _NOTES = {
     "advanced_auditing": (
-        "UAL will run — MailItemsAccessed/Send events require Advanced Auditing"
+        "UAL will run — MailItemsAccessed requires E5/Audit Premium "
+        "(Send and other events are available on all plans)"
     ),
 }
 

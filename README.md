@@ -167,14 +167,14 @@ Targeted collection for a known (or suspected) compromised account. Collects in 
 7. Mailbox inbox rules (hide/forward/delete rules)
 8. Mailbox forwarding settings (SMTP forwarding to external address)
 9. OAuth app grants (malicious app consent)
-10. Unified Audit Log — `MailItemsAccessed`, forwarding rules, file downloads — *requires M365 Advanced Auditing (E5 or Purview add-on)*
+10. Unified Audit Log — forwarding rules, file downloads, `Send` and most events on all plans; `MailItemsAccessed` requires E5 / Purview Audit Premium
 
 **License-aware collection:** Before running, CIRRUS checks the tenant's license tier and shows which collectors will run. Collectors for unlicensed features are gracefully skipped with a clear explanation rather than failing with an API error.
 
 ```
 Tenant license profile:  Entra ID P1 ✓   Entra ID P2 ✗   M365 Advanced Auditing (UAL) ✗
   ↳ Entra ID P2 not found — risky_users, risky_signins will be skipped
-  ↳ M365 Advanced Auditing (UAL) not found — unified_audit_log will be skipped
+  ↳ UAL will run — MailItemsAccessed requires E5/Audit Premium (Send and other events are available on all plans)
 ```
 
 ```bash
