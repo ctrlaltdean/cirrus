@@ -188,6 +188,22 @@ class GraphCollector:
         if not self.license_profile.allows(feature):
             raise CollectorError(f"Skipped: {detail}")
 
+    def sofelk_transform(self, records: list[dict]) -> list[dict]:
+        """
+        Transform records into SOF-ELK compatible NDJSON format.
+
+        The default implementation is a passthrough — records are written
+        as-is to the .ndjson file. Subclasses override this to normalize
+        field names, promote nested structures, etc.
+
+        Args:
+            records: Raw records returned by collect().
+
+        Returns:
+            List of dicts to write to the .ndjson output file.
+        """
+        return records
+
     def collect(self, **kwargs: Any) -> list[dict]:
         """
         Override in subclasses. Returns a list of record dicts.

@@ -30,8 +30,10 @@ class CollectionResult:
     record_count: int
     json_path: Path
     csv_path: Path
+    ndjson_path: Path
     json_hash: str
     csv_hash: str
+    ndjson_hash: str
     ioc_count: int = 0
     error: str | None = None
 
@@ -134,8 +136,12 @@ class BaseWorkflow:
 
                 try:
                     records = collector.collect(**collector_kwargs)
-                    json_path, csv_path, json_hash, csv_hash = save_collection(
-                        records, self.case.case_dir, collector.name
+                    ndjson_records = collector.sofelk_transform(records)
+                    json_path, csv_path, ndjson_path, json_hash, csv_hash, ndjson_hash = (
+                        save_collection(
+                            records, self.case.case_dir, collector.name,
+                            ndjson_records=ndjson_records,
+                        )
                     )
                     ioc_count = sum(
                         len(r.get("_iocFlags", [])) for r in records
@@ -153,8 +159,10 @@ class BaseWorkflow:
                         record_count=len(records),
                         json_path=json_path,
                         csv_path=csv_path,
+                        ndjson_path=ndjson_path,
                         json_hash=json_hash,
                         csv_hash=csv_hash,
+                        ndjson_hash=ndjson_hash,
                         ioc_count=ioc_count,
                     )
                     result.results.append(cr)
@@ -167,8 +175,10 @@ class BaseWorkflow:
                         record_count=0,
                         json_path=Path(),
                         csv_path=Path(),
+                        ndjson_path=Path(),
                         json_hash="",
                         csv_hash="",
+                        ndjson_hash="",
                         error=str(e),
                     )
                     result.results.append(cr)

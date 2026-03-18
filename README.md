@@ -45,7 +45,7 @@ CIRRUS is a command-line tool for collecting forensic artifacts from Microsoft 3
 | **Multi-Tenant** | Authenticate to and collect from multiple client tenants independently |
 | **Flexible Targeting** | Single user, multiple users, file list, or entire tenant |
 | **Chain of Custody** | Tamper-evident SHA-256 hash chain audit log per case |
-| **Dual Output** | Every collector writes JSON + CSV |
+| **Triple Output** | Every collector writes JSON + CSV + NDJSON (SOF-ELK ready) |
 | **IOC Flagging** | Collectors auto-annotate records with `_iocFlags` for quick triage |
 | **Auto-Update** | Checks for new releases in the background; update in one command |
 | **Standalone Executable** | Single file download — no Python required on analyst machines |
@@ -390,21 +390,50 @@ investigations/
     ├── case_audit.jsonl                ← tamper-evident chain-of-custody log
     ├── case_audit.txt                  ← human-readable audit log
     │
-    ├── users.json / .csv
-    ├── signin_logs.json / .csv
-    ├── entra_audit_logs.json / .csv
-    ├── risky_users.json / .csv
-    ├── risky_signins.json / .csv
-    ├── mfa_methods.json / .csv
-    ├── mailbox_rules.json / .csv
-    ├── mail_forwarding.json / .csv
-    ├── oauth_grants.json / .csv
-    ├── conditional_access_policies.json / .csv
-    ├── service_principals.json / .csv
-    ├── unified_audit_log.json / .csv
+    ├── users.json / .csv / .ndjson
+    ├── signin_logs.json / .csv / .ndjson
+    ├── entra_audit_logs.json / .csv / .ndjson
+    ├── risky_users.json / .csv / .ndjson
+    ├── risky_signins.json / .csv / .ndjson
+    ├── mfa_methods.json / .csv / .ndjson
+    ├── mailbox_rules.json / .csv / .ndjson
+    ├── mail_forwarding.json / .csv / .ndjson
+    ├── oauth_grants.json / .csv / .ndjson
+    ├── conditional_access_policies.json / .csv / .ndjson
+    ├── service_principals.json / .csv / .ndjson
+    ├── unified_audit_log.json / .csv / .ndjson   ← UAL NDJSON is SOF-ELK normalized
     │
-    └── compliance_audit.json / .csv / .txt   ← audit workflow only
+    └── compliance_audit.json / .csv / .txt        ← audit workflow only
 ```
+
+Each collector produces three output files:
+- **`.json`** — Pretty-printed JSON array. Human-readable, easy to open in any editor or `jq`.
+- **`.csv`** — Flattened CSV with a header row. Import directly into Excel or SIEM ingestion pipelines.
+- **`.ndjson`** — JSON Lines (one object per line). Ready for direct ingestion by SOF-ELK, Elastic, or any Logstash pipeline.
+
+### SOF-ELK Ingestion
+
+[SOF-ELK](https://github.com/philhagen/sof-elk) automatically ingests files placed in specific directories on the VM. Copy CIRRUS `.ndjson` files to the appropriate path:
+
+| Collector | SOF-ELK target directory |
+|-----------|--------------------------|
+| `unified_audit_log.ndjson` | `/logstash/microsoft365/` |
+| `signin_logs.ndjson` | `/logstash/azure/` |
+| `entra_audit_logs.ndjson` | `/logstash/azure/` |
+
+```bash
+# Example: copy case output to SOF-ELK VM via SCP
+scp investigations/CONTOSO_20260317_143022/unified_audit_log.ndjson \
+    analyst@sofelk:/logstash/microsoft365/
+
+scp investigations/CONTOSO_20260317_143022/signin_logs.ndjson \
+    analyst@sofelk:/logstash/azure/
+
+scp investigations/CONTOSO_20260317_143022/entra_audit_logs.ndjson \
+    analyst@sofelk:/logstash/azure/
+```
+
+UAL records are normalized to match native `Search-UnifiedAuditLog` field names (`CreationTime`, `Operation`, `UserId`, `Workload`, `ClientIP`, etc.) and the `auditData` payload is promoted to the top level — exactly the shape SOF-ELK's microsoft365 pipeline expects.
 
 ---
 

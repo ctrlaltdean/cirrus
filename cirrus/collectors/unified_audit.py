@@ -34,6 +34,21 @@ from cirrus.collectors.base import GRAPH_BETA, CollectorError, GraphCollector
 POLL_INTERVAL = 5    # seconds between status checks
 POLL_TIMEOUT = 1800  # seconds before giving up — large tenants can take 20-30 min
 
+# Map Graph API UAL field names → native Search-UnifiedAuditLog PascalCase names.
+# SOF-ELK's microsoft365 pipeline expects the native field names.
+_UAL_FIELD_MAP: dict[str, str] = {
+    "id":                 "Id",
+    "createdDateTime":    "CreationTime",
+    "auditLogRecordType": "RecordType",
+    "operation":          "Operation",
+    "organizationId":     "OrganizationId",
+    "userType":           "UserType",
+    "userId":             "UserId",
+    "clientIp":           "ClientIP",
+    "objectId":           "ObjectId",
+    "service":            "Workload",
+}
+
 
 class UnifiedAuditCollector(GraphCollector):
     name = "unified_audit_log"
@@ -109,3 +124,40 @@ class UnifiedAuditCollector(GraphCollector):
         records_url = f"{GRAPH_BETA}/security/auditLog/queries/{query_id}/records"
         records = self._collect_all(records_url)
         return records
+
+    def sofelk_transform(self, records: list[dict]) -> list[dict]:
+        """
+        Normalize UAL records for SOF-ELK ingestion via /logstash/microsoft365/.
+
+        Each Graph API UAL record has:
+          - Top-level camelCase fields (id, createdDateTime, operation, …)
+          - An `auditData` dict containing the workload-specific payload
+            with fields already in native PascalCase (ApplicationId, etc.)
+
+        SOF-ELK expects the native Search-UnifiedAuditLog shape:
+          - auditData fields promoted to top level
+          - Top-level fields renamed to PascalCase (CreationTime, UserId, …)
+        """
+        result: list[dict] = []
+        for record in records:
+            normalized: dict = {}
+
+            # 1. Promote auditData fields first (already PascalCase from the API)
+            audit_data = record.get("auditData")
+            if isinstance(audit_data, str):
+                import json as _json
+                try:
+                    audit_data = _json.loads(audit_data)
+                except Exception:
+                    audit_data = None
+            if isinstance(audit_data, dict):
+                normalized.update(audit_data)
+
+            # 2. Map and overlay top-level Graph API fields (these take precedence
+            #    over any same-named keys that may have come from auditData)
+            for graph_key, ual_key in _UAL_FIELD_MAP.items():
+                if graph_key in record:
+                    normalized[ual_key] = record[graph_key]
+
+            result.append(normalized)
+        return result

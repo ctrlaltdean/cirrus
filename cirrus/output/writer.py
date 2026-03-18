@@ -1,12 +1,17 @@
 """
-Output writers: JSON and CSV.
+Output writers: JSON, CSV, and NDJSON.
 
 Every collector returns a list of dicts. The writer saves them to:
-  - <name>.json   (pretty-printed, UTF-8)
-  - <name>.csv    (flattened, with a header row)
+  - <name>.json    (pretty-printed, UTF-8)
+  - <name>.csv     (flattened, with a header row)
+  - <name>.ndjson  (one JSON object per line — SOF-ELK / JSON Lines format)
 
-Both files are written atomically and their SHA-256 hash is recorded
+All files are written atomically and their SHA-256 hash is recorded
 in the audit log for chain-of-custody.
+
+SOF-ELK ingestion paths (copy .ndjson files to the SOF-ELK VM):
+  - Unified Audit Log  →  /logstash/microsoft365/
+  - Sign-in / Entra    →  /logstash/azure/
 """
 
 from __future__ import annotations
@@ -53,6 +58,19 @@ def write_json(records: list[dict], path: Path) -> str:
     return file_sha256(path)
 
 
+def write_ndjson(records: list[dict], path: Path) -> str:
+    """
+    Write records as NDJSON (JSON Lines) — one JSON object per line.
+    This is the format expected by SOF-ELK's Logstash pipelines.
+    Returns SHA-256.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    return file_sha256(path)
+
+
 def write_csv(records: list[dict], path: Path) -> str:
     """
     Write records as a CSV file with a header row.
@@ -86,14 +104,26 @@ def save_collection(
     records: list[dict],
     case_dir: Path,
     base_name: str,
-) -> tuple[Path, Path, str, str]:
+    ndjson_records: list[dict] | None = None,
+) -> tuple[Path, Path, Path, str, str, str]:
     """
-    Save a collection to both JSON and CSV.
+    Save a collection to JSON, CSV, and NDJSON.
 
-    Returns (json_path, csv_path, json_sha256, csv_sha256).
+    Args:
+        records:       Raw records written to .json and .csv.
+        case_dir:      Case output directory.
+        base_name:     File stem (e.g. "unified_audit_log").
+        ndjson_records: SOF-ELK normalized records for .ndjson output.
+                        If None, the raw records are used as-is.
+
+    Returns (json_path, csv_path, ndjson_path, json_sha256, csv_sha256, ndjson_sha256).
     """
     json_path = case_dir / f"{base_name}.json"
     csv_path = case_dir / f"{base_name}.csv"
+    ndjson_path = case_dir / f"{base_name}.ndjson"
     json_hash = write_json(records, json_path)
     csv_hash = write_csv(records, csv_path)
-    return json_path, csv_path, json_hash, csv_hash
+    ndjson_hash = write_ndjson(
+        ndjson_records if ndjson_records is not None else records, ndjson_path
+    )
+    return json_path, csv_path, ndjson_path, json_hash, csv_hash, ndjson_hash
