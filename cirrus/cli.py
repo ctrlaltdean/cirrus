@@ -1621,20 +1621,6 @@ def analyze(
     report_path = generate_report(case_dir)
     console.print(f"[bold]Report:[/bold] [cyan]{report_path}[/cyan]\n")
 
-        # Print details for each finding
-        for f in findings:
-            sev = f["severity"]
-            color = severity_style.get(sev, "white")
-            console.print(
-                Panel(
-                    f"[bold]{f['description']}[/bold]\n\n"
-                    f"[dim]Recommendation:[/dim] {f['recommendation']}",
-                    title=f"[{color}]{f['id']} — {f['title']}[/{color}]",
-                    border_style=color,
-                    expand=False,
-                )
-            )
-
 
 # ---------------------------------------------------------------------------
 # Update command
