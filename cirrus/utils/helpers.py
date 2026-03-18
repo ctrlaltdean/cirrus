@@ -71,3 +71,19 @@ def days_ago_filter(days: int) -> str:
 def dt_to_odata(dt: datetime) -> str:
     """Format a UTC datetime as an OData-compatible ISO-8601 string."""
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def is_private_ip(ip: str) -> bool:
+    """
+    Return True if the IP address is RFC1918, loopback, or link-local.
+    Used by collectors to suppress IOC flags for internal/infrastructure IPs.
+    """
+    if not ip:
+        return True
+    return (
+        ip.startswith("10.")
+        or ip.startswith("127.")
+        or ip.startswith("169.254.")
+        or ip.startswith("192.168.")
+        or any(ip.startswith(f"172.{i}.") for i in range(16, 32))
+    )
