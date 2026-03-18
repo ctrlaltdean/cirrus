@@ -21,10 +21,11 @@ Key IOCs surfaced:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from cirrus.collectors.base import GRAPH_BASE, GraphCollector
-from cirrus.utils.helpers import days_ago_filter
+from cirrus.utils.helpers import days_ago_filter, dt_to_odata
 
 
 class AuditLogsCollector(GraphCollector):
@@ -34,13 +35,18 @@ class AuditLogsCollector(GraphCollector):
         self,
         days: int = 30,
         users: list[str] | None = None,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
     ) -> list[dict]:
         """
         Collect Entra directory audit logs.
 
         Args:
-            days:  How many days back to collect (default 30).
-            users: Filter by initiatedBy UPN. None = all.
+            days:     How many days back to collect (default 30).
+                      Ignored when start_dt is provided.
+            users:    Filter by initiatedBy UPN. None = all.
+            start_dt: Explicit collection start (UTC). Overrides days.
+            end_dt:   Explicit collection end (UTC). Adds an upper bound filter.
 
         Returns list of audit event dicts.
         """
@@ -49,8 +55,11 @@ class AuditLogsCollector(GraphCollector):
             "Directory audit logs (/auditLogs/directoryAudits) require Entra ID P1 or higher.",
         )
 
-        since = days_ago_filter(days)
+        since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
         filters = [f"activityDateTime ge {since}"]
+
+        if end_dt is not None:
+            filters.append(f"activityDateTime le {dt_to_odata(end_dt)}")
 
         if users:
             user_filters = " or ".join(

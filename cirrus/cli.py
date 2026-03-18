@@ -29,6 +29,7 @@ import json
 import sys
 import time as _time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -142,7 +143,9 @@ def _silent_update_check() -> None:
 TenantOpt = Annotated[str, typer.Option("--tenant", "-t", help="Tenant domain or GUID (e.g. contoso.com or <guid>)")]
 OutputDirOpt = Annotated[Path, typer.Option("--output-dir", "-o", help="Directory to write case folders to.", show_default=True)]
 CaseNameOpt = Annotated[Optional[str], typer.Option("--case-name", "-c", help="Custom case name prefix.")]
-DaysOpt = Annotated[int, typer.Option("--days", "-d", help="How many days back to collect.", show_default=True)]
+DaysOpt = Annotated[Optional[int], typer.Option("--days", "-d", help="Days back to collect (alternative to --start-date / --end-date).")]
+StartDateOpt = Annotated[Optional[str], typer.Option("--start-date", help="Collection start date, YYYY-MM-DD (alternative to --days).")]
+EndDateOpt = Annotated[Optional[str], typer.Option("--end-date", help="Collection end date, YYYY-MM-DD (default: today). Use with --start-date.")]
 UserOpt = Annotated[Optional[str], typer.Option("--user", help="Single target user UPN.")]
 UsersOpt = Annotated[Optional[list[str]], typer.Option("--users", help="Multiple target UPNs (repeat flag for each).")]
 UsersFileOpt = Annotated[Optional[Path], typer.Option("--users-file", help="Text file with one UPN per line.")]
@@ -151,6 +154,11 @@ ClientIdOpt = Annotated[Optional[str], typer.Option("--client-id", help="Overrid
 BenchmarkOpt = Annotated[Optional[str], typer.Option("--benchmark", "-b", help="Benchmark: cis-m365, cis-entra, or all. Omit to use the wizard.")]
 LevelOpt = Annotated[Optional[str], typer.Option("--level", "-l", help="CIS levels: 1, 2, or all. Omit to use the wizard.")]
 OptionalTenantOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help="Tenant domain or GUID. Prompted if omitted.")]
+
+_DATE_FMT = "%Y-%m-%d"
+# Maximum UAL retention periods (informational — shown in the wizard).
+_UAL_RETENTION_STANDARD = 90
+_UAL_RETENTION_E5 = 180
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +260,147 @@ def _authenticate(tenant: str, client_id: str | None = None) -> tuple[str, str]:
         raise typer.Exit(1)
 
 
+def _resolve_date_range(
+    days: int | None,
+    start_date: str | None,
+    end_date: str | None,
+) -> tuple[datetime, datetime]:
+    """
+    Resolve the collection date range from CLI flags or interactive wizard.
+
+    Priority:
+      1. --start-date / --end-date  →  parse and return, no prompt
+      2. --days                     →  compute from now, no prompt
+      3. Neither provided           →  launch interactive wizard
+
+    Returns (start_dt, end_dt) as UTC-aware datetimes.
+    """
+    today_end = datetime.now(timezone.utc).replace(
+        hour=23, minute=59, second=59, microsecond=0
+    )
+
+    def _parse_date(s: str, flag: str) -> datetime:
+        try:
+            return datetime.strptime(s, _DATE_FMT).replace(tzinfo=timezone.utc)
+        except ValueError:
+            console.print(
+                f"[red]Invalid {flag} format:[/red] '{s}'. "
+                f"Expected YYYY-MM-DD (e.g. 2026-03-01)."
+            )
+            raise typer.Exit(1)
+
+    def _validate(start: datetime, end: datetime) -> None:
+        if start >= end:
+            console.print(
+                "[red]Start date must be before end date.[/red]"
+            )
+            raise typer.Exit(1)
+        span_days = (end - start).days
+        if span_days > _UAL_RETENTION_E5:
+            console.print(
+                f"[yellow]⚠  Range spans {span_days} days — exceeds the maximum UAL "
+                f"retention of {_UAL_RETENTION_E5} days (E5/Advanced Auditing). "
+                "Records older than your tenant's retention limit will not appear.[/yellow]"
+            )
+        if end > datetime.now(timezone.utc) + timedelta(minutes=5):
+            console.print(
+                "[yellow]⚠  End date is in the future — collection will stop at the "
+                "latest available record.[/yellow]"
+            )
+
+    # --- Flag path: --start-date provided ---
+    if start_date:
+        start_dt = _parse_date(start_date, "--start-date")
+        end_dt = _parse_date(end_date, "--end-date") if end_date else today_end
+        end_dt = end_dt.replace(hour=23, minute=59, second=59)
+        _validate(start_dt, end_dt)
+        return start_dt, end_dt
+
+    # --- Flag path: --days provided ---
+    if days is not None:
+        start_dt = datetime.now(timezone.utc) - timedelta(days=days)
+        return start_dt, today_end
+
+    # --- Interactive wizard ---
+    console.print()
+    console.print(
+        Panel.fit(
+            "[bold]Collection Date Range[/bold]\n"
+            "[dim]Specify the window of logs to collect.[/dim]",
+            border_style="bright_blue",
+        )
+    )
+    console.print()
+
+    # Retention reference table
+    table = Table(show_header=True, header_style="bold", border_style="dim", box=None)
+    table.add_column("Log type", style="cyan", min_width=28)
+    table.add_column("Max retention", justify="right")
+    table.add_column("Notes", style="dim")
+    table.add_row(
+        "Sign-in logs",
+        "30 days",
+        "Entra ID P1 required",
+    )
+    table.add_row(
+        "Entra directory audit logs",
+        "30 days",
+        "Entra ID P1 required",
+    )
+    table.add_row(
+        "Unified Audit Log (UAL)",
+        f"{_UAL_RETENTION_STANDARD} days",
+        f"{_UAL_RETENTION_E5} days with E5 / Advanced Auditing",
+    )
+    console.print(table)
+    console.print()
+    console.print(
+        "  [dim]Enter dates in [bold]YYYY-MM-DD[/bold] format  "
+        "(e.g. [bold]2026-03-01[/bold])[/dim]\n"
+    )
+
+    today_str = datetime.now(timezone.utc).strftime(_DATE_FMT)
+
+    while True:
+        start_str = Prompt.ask("  Start date [bold](YYYY-MM-DD)[/bold]").strip()
+        if not start_str:
+            console.print("  [red]Start date is required.[/red]")
+            continue
+        try:
+            start_dt = datetime.strptime(start_str, _DATE_FMT).replace(tzinfo=timezone.utc)
+            break
+        except ValueError:
+            console.print(
+                f"  [red]Unrecognised date '[/red]{start_str}[red]' — use YYYY-MM-DD "
+                f"(e.g. 2026-03-01).[/red]"
+            )
+
+    while True:
+        end_str = Prompt.ask(
+            f"  End date   [bold](YYYY-MM-DD)[/bold]",
+            default=today_str,
+        ).strip()
+        try:
+            end_dt = datetime.strptime(end_str, _DATE_FMT).replace(
+                hour=23, minute=59, second=59, tzinfo=timezone.utc
+            )
+            break
+        except ValueError:
+            console.print(
+                f"  [red]Unrecognised date '[/red]{end_str}[red]' — use YYYY-MM-DD "
+                f"(e.g. {today_str}).[/red]"
+            )
+
+    span = (end_dt - start_dt).days + 1
+    console.print(
+        f"\n  [green]✓[/green] Collecting [bold]{span} day(s)[/bold]  "
+        f"[dim]({start_dt.strftime(_DATE_FMT)} → {end_dt.strftime(_DATE_FMT)})[/dim]\n"
+    )
+
+    _validate(start_dt, end_dt)
+    return start_dt, end_dt
+
+
 # ---------------------------------------------------------------------------
 # auth commands
 # ---------------------------------------------------------------------------
@@ -312,7 +461,9 @@ def run_bec(
     tenant: TenantOpt,
     output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
     case_name: CaseNameOpt = None,
-    days: DaysOpt = 30,
+    days: DaysOpt = None,
+    start_date: StartDateOpt = None,
+    end_date: EndDateOpt = None,
     user: UserOpt = None,
     users: UsersOpt = None,
     users_file: UsersFileOpt = None,
@@ -326,13 +477,13 @@ def run_bec(
     OAuth grants, MFA methods, risky user data, and the Unified Audit Log
     for target user(s).
 
-    Example:
+    Examples:
         cirrus run bec --tenant contoso.com --user john@contoso.com --days 30
+        cirrus run bec --tenant contoso.com --user john@contoso.com --start-date 2026-03-01 --end-date 2026-03-15
     """
     _banner()
     console.print(f"[bold magenta]Workflow:[/bold magenta] Business Email Compromise (BEC)")
-    console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]")
-    console.print(f"[bold]Days:[/bold]    {days}\n")
+    console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]\n")
 
     target_users = _resolve_users(user, users, users_file, all_users)
     if target_users:
@@ -340,6 +491,8 @@ def run_bec(
     else:
         if not Confirm.ask("[yellow]No user filter — this will collect data for ALL users. Continue?[/yellow]"):
             raise typer.Exit(0)
+
+    start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
 
     token, _ = _authenticate(tenant, client_id)
 
@@ -350,12 +503,18 @@ def run_bec(
     case.audit.log_event("WORKFLOW_CONFIG", {
         "workflow": "bec",
         "tenant": tenant,
-        "days": days,
+        "start_date": start_dt.strftime(_DATE_FMT),
+        "end_date": end_dt.strftime(_DATE_FMT),
         "users": target_users or "all",
     })
 
     workflow = BECWorkflow(token, case)
-    result = workflow.run(users=target_users, days=days, tenant=tenant)
+    result = workflow.run(
+        users=target_users,
+        tenant=tenant,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
 
     render_summary(result)
     case.close()
@@ -371,7 +530,9 @@ def run_full(
     tenant: TenantOpt,
     output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
     case_name: CaseNameOpt = None,
-    days: DaysOpt = 30,
+    days: DaysOpt = None,
+    start_date: StartDateOpt = None,
+    end_date: EndDateOpt = None,
     user: UserOpt = None,
     users: UsersOpt = None,
     users_file: UsersFileOpt = None,
@@ -384,13 +545,13 @@ def run_full(
     Sweeps the entire tenant for all supported artifact types.
     Use when the compromised account is unknown, or for proactive threat hunting.
 
-    Example:
+    Examples:
         cirrus run full --tenant contoso.com --all-users --days 90
+        cirrus run full --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-15
     """
     _banner()
     console.print(f"[bold magenta]Workflow:[/bold magenta] Full Tenant Collection")
-    console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]")
-    console.print(f"[bold]Days:[/bold]    {days}\n")
+    console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]\n")
 
     console.print(
         "[yellow]⚠  Full collection on large tenants may take a long time "
@@ -404,6 +565,8 @@ def run_full(
         if not Confirm.ask("Collect for ALL users in the tenant. Continue?"):
             raise typer.Exit(0)
 
+    start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
+
     token, _ = _authenticate(tenant, client_id)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -413,12 +576,18 @@ def run_full(
     case.audit.log_event("WORKFLOW_CONFIG", {
         "workflow": "full",
         "tenant": tenant,
-        "days": days,
+        "start_date": start_dt.strftime(_DATE_FMT),
+        "end_date": end_dt.strftime(_DATE_FMT),
         "users": target_users or "all",
     })
 
     workflow = FullWorkflow(token, case)
-    result = workflow.run(users=target_users, days=days, tenant=tenant)
+    result = workflow.run(
+        users=target_users,
+        tenant=tenant,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
 
     render_summary(result)
     case.close()

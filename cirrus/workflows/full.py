@@ -16,6 +16,8 @@ Typical usage:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from cirrus.collectors.audit_logs import AuditLogsCollector
 from cirrus.collectors.conditional_access import ConditionalAccessCollector
 from cirrus.collectors.mail_forwarding import MailForwardingCollector
@@ -37,7 +39,8 @@ class FullWorkflow(BaseWorkflow):
     def _build_steps(
         self,
         users: list[str] | None,
-        days: int,
+        start_dt: datetime,
+        end_dt: datetime,
         **kwargs,
     ) -> list[tuple]:
         return [
@@ -48,12 +51,12 @@ class FullWorkflow(BaseWorkflow):
             ),
             (
                 SignInLogsCollector,
-                {"days": days, "users": users},
+                {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Sign-in logs",
             ),
             (
                 AuditLogsCollector,
-                {"days": days, "users": users},
+                {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Entra directory audit logs",
             ),
             (
@@ -63,7 +66,7 @@ class FullWorkflow(BaseWorkflow):
             ),
             (
                 RiskySignInsCollector,
-                {"days": days, "users": users},
+                {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Risky sign-ins",
             ),
             (
@@ -98,7 +101,7 @@ class FullWorkflow(BaseWorkflow):
             ),
             (
                 UnifiedAuditCollector,
-                {"days": days, "users": users},
+                {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Unified Audit Log (UAL)",
             ),
         ]

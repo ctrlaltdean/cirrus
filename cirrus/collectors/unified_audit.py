@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from cirrus.collectors.base import GRAPH_BETA, CollectorError, GraphCollector
+from cirrus.utils.helpers import dt_to_odata
 
 POLL_INTERVAL = 5    # seconds between status checks
 POLL_TIMEOUT = 1800  # seconds before giving up — large tenants can take 20-30 min
@@ -59,26 +60,33 @@ class UnifiedAuditCollector(GraphCollector):
         users: list[str] | None = None,
         record_types: list[str] | None = None,
         operations: list[str] | None = None,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
     ) -> list[dict]:
         """
         Collect Unified Audit Log records via the Graph beta async query API.
 
         Args:
             days:         How many days back to search (default 30, max 180).
+                          Ignored when start_dt / end_dt are provided.
             users:        Filter to specific UPNs. None = all users.
             record_types: Filter to specific UAL record types
                           (e.g. ["ExchangeItem", "SharePoint"]).
             operations:   Filter to specific operations
                           (e.g. ["MailItemsAccessed", "FileDownloaded"]).
+            start_dt:     Explicit collection start (UTC). Overrides days.
+            end_dt:       Explicit collection end (UTC). Overrides days.
 
         Returns list of UAL record dicts.
         """
-        end_dt = datetime.now(timezone.utc)
-        start_dt = end_dt - timedelta(days=days)
+        if end_dt is None:
+            end_dt = datetime.now(timezone.utc)
+        if start_dt is None:
+            start_dt = end_dt - timedelta(days=days)
 
         query_body: dict[str, Any] = {
-            "filterStartDateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "filterEndDateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "filterStartDateTime": dt_to_odata(start_dt),
+            "filterEndDateTime": dt_to_odata(end_dt),
         }
 
         if users:

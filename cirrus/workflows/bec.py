@@ -22,6 +22,8 @@ Typical usage:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from cirrus.collectors.audit_logs import AuditLogsCollector
 from cirrus.collectors.mail_forwarding import MailForwardingCollector
 from cirrus.collectors.mailbox_rules import MailboxRulesCollector
@@ -41,7 +43,8 @@ class BECWorkflow(BaseWorkflow):
     def _build_steps(
         self,
         users: list[str] | None,
-        days: int,
+        start_dt: datetime,
+        end_dt: datetime,
         **kwargs,
     ) -> list[tuple]:
         return [
@@ -52,12 +55,12 @@ class BECWorkflow(BaseWorkflow):
             ),
             (
                 SignInLogsCollector,
-                {"days": days, "users": users},
+                {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Sign-in logs",
             ),
             (
                 AuditLogsCollector,
-                {"days": days, "users": users},
+                {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Entra directory audit logs",
             ),
             (
@@ -67,7 +70,7 @@ class BECWorkflow(BaseWorkflow):
             ),
             (
                 RiskySignInsCollector,
-                {"days": days, "users": users},
+                {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Risky sign-ins (Identity Protection)",
             ),
             (
@@ -93,7 +96,8 @@ class BECWorkflow(BaseWorkflow):
             (
                 UnifiedAuditCollector,
                 {
-                    "days": days,
+                    "start_dt": start_dt,
+                    "end_dt": end_dt,
                     "users": users,
                     "operations": [
                         "MailItemsAccessed",

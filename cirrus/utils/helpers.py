@@ -66,3 +66,8 @@ def days_ago_filter(days: int) -> str:
     from datetime import timedelta
     dt = datetime.now(timezone.utc) - timedelta(days=days)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def dt_to_odata(dt: datetime) -> str:
+    """Format a UTC datetime as an OData-compatible ISO-8601 string."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")

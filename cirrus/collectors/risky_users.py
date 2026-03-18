@@ -26,10 +26,11 @@ Key IOCs:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from cirrus.collectors.base import GRAPH_BASE, GraphCollector
-from cirrus.utils.helpers import days_ago_filter
+from cirrus.utils.helpers import days_ago_filter, dt_to_odata
 
 
 class RiskyUsersCollector(GraphCollector):
@@ -91,13 +92,18 @@ class RiskySignInsCollector(GraphCollector):
         self,
         days: int = 30,
         users: list[str] | None = None,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
     ) -> list[dict]:
         """
         Collect risky sign-in events.
 
         Args:
-            days:  How many days back to collect.
-            users: Filter to specific UPNs.
+            days:     How many days back to collect.
+                      Ignored when start_dt is provided.
+            users:    Filter to specific UPNs.
+            start_dt: Explicit collection start (UTC). Overrides days.
+            end_dt:   Explicit collection end (UTC). Adds an upper bound filter.
 
         Returns list of risky sign-in dicts.
         """
@@ -107,8 +113,11 @@ class RiskySignInsCollector(GraphCollector):
             "This tenant appears to be licensed at P1 only.",
         )
 
-        since = days_ago_filter(days)
+        since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
         filters = [f"createdDateTime ge {since}"]
+
+        if end_dt is not None:
+            filters.append(f"createdDateTime le {dt_to_odata(end_dt)}")
 
         if users:
             user_filter = " or ".join(

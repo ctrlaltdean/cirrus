@@ -8,6 +8,7 @@ and render progress to the terminal via Rich.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,17 +77,19 @@ class BaseWorkflow:
     def run(
         self,
         users: list[str] | None,
-        days: int,
         tenant: str,
+        start_dt: datetime,
+        end_dt: datetime,
         extra_params: dict[str, Any] | None = None,
     ) -> WorkflowResult:
         """
         Execute the workflow.
 
         Args:
-            users:       Target users (None = all).
-            days:        Days back to collect.
-            tenant:      Tenant identifier (for display/logging).
+            users:        Target users (None = all).
+            tenant:       Tenant identifier (for display/logging).
+            start_dt:     Collection window start (UTC).
+            end_dt:       Collection window end (UTC).
             extra_params: Additional params passed to collectors.
 
         Returns WorkflowResult with per-collector results.
@@ -100,7 +103,12 @@ class BaseWorkflow:
 
         self.case.audit.log_workflow_start(
             self.name,
-            {"tenant": tenant, "users": users or "all", "days": days},
+            {
+                "tenant": tenant,
+                "users": users or "all",
+                "start_date": start_dt.strftime("%Y-%m-%d"),
+                "end_date": end_dt.strftime("%Y-%m-%d"),
+            },
         )
 
         # ------------------------------------------------------------------ #
@@ -114,7 +122,7 @@ class BaseWorkflow:
         license_profile = TenantLicenseProfile.fetch(_probe_session)
         _render_license_banner(license_profile)
 
-        steps = self._build_steps(users=users, days=days, **params)
+        steps = self._build_steps(users=users, start_dt=start_dt, end_dt=end_dt, **params)
 
         with Progress(
             SpinnerColumn(),
@@ -188,7 +196,11 @@ class BaseWorkflow:
         return result
 
     def _build_steps(
-        self, users: list[str] | None, days: int, **kwargs
+        self,
+        users: list[str] | None,
+        start_dt: datetime,
+        end_dt: datetime,
+        **kwargs,
     ) -> list[tuple]:
         """
         Override in subclasses.
