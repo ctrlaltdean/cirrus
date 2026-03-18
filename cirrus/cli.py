@@ -55,6 +55,7 @@ from cirrus.utils.deps import (
     install_all_missing,
 )
 from cirrus.utils.updater import apply_update, check_for_update, is_frozen
+from cirrus.workflows.ato import ATOWorkflow
 from cirrus.workflows.base import render_summary
 from cirrus.workflows.bec import BECWorkflow
 from cirrus.workflows.full import FullWorkflow
@@ -223,9 +224,11 @@ def _show_run_summary(
         f"{start_dt.strftime(_DATE_FMT)} \u2192 {end_dt.strftime(_DATE_FMT)}  ({span_days} days)"
     )
     targets = ", ".join(users) if users is not None else "All users in tenant"
-    workflow_label = (
-        "BEC Investigation" if workflow == "bec" else "Full Tenant Collection"
-    )
+    workflow_label = {
+        "bec": "BEC Investigation",
+        "ato": "ATO Investigation",
+        "full": "Full Tenant Collection",
+    }.get(workflow, workflow.upper())
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Key", style="bold", min_width=14)
     table.add_column("Value", style="cyan")
@@ -641,6 +644,107 @@ def run_bec(
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors. Check case_audit.txt for details.[/yellow]")
 
     console.print("[bold green]BEC collection complete.[/bold green]")
+
+
+@run_app.command("ato")
+def run_ato(
+    tenant: TenantRunOpt = None,
+    output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
+    case_name: CaseNameOpt = None,
+    days: DaysOpt = None,
+    start_date: StartDateOpt = None,
+    end_date: EndDateOpt = None,
+    user: UserOpt = None,
+    users: UsersOpt = None,
+    users_file: UsersFileOpt = None,
+    all_users: AllUsersOpt = False,
+    client_id: ClientIdOpt = None,
+) -> None:
+    """
+    [bold]Account Takeover (ATO) Investigation Workflow[/bold]
+
+    Collects the authentication layer and persistence artifacts for an ATO
+    investigation: sign-in logs, directory audit events, MFA methods, registered
+    devices, Conditional Access policies, OAuth grants, newly created app
+    registrations, and the Unified Audit Log.
+
+    Use BEC when you already know the account was compromised and want to
+    focus on mailbox-level artifacts (rules, forwarding). Use ATO when you
+    are investigating the authentication event itself, looking for persistence
+    mechanisms, or assessing blast radius.
+
+    Run without flags to launch the interactive wizard.
+
+    Examples (scripted):
+        cirrus run ato --tenant contoso.com --user john@contoso.com --days 30
+        cirrus run ato --tenant contoso.com --users john@contoso.com --users jane@contoso.com --start-date 2026-03-01 --end-date 2026-03-18
+        cirrus run ato --tenant contoso.com --users-file targets.txt --days 14
+        cirrus run ato --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-18
+    """
+    _banner()
+    interactive = tenant is None
+    if interactive:
+        console.print(Panel.fit(
+            "[bold]ATO Investigation Wizard[/bold]\n"
+            "[dim]Answer a few questions to configure your collection run.\n"
+            "Press Ctrl+C at any time to cancel.[/dim]",
+            border_style="bright_blue",
+        ))
+        console.print()
+        tenant = _prompt_tenant()
+    else:
+        console.print(f"[bold magenta]Workflow:[/bold magenta] Account Takeover (ATO) Investigation")
+        console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]\n")
+
+    target_users = _resolve_users(user, users, users_file, all_users)
+    if target_users:
+        console.print(f"[bold]Targets:[/bold] {', '.join(target_users)}\n")
+    else:
+        if not Confirm.ask("[yellow]No user filter — this will collect data for ALL users. Continue?[/yellow]"):
+            raise typer.Exit(0)
+
+    start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
+
+    if interactive and case_name is None:
+        case_name_input = Prompt.ask(
+            "Case name [dim](optional \u2014 leave blank for auto-generated)[/dim]",
+            default="",
+        ).strip()
+        case_name = case_name_input or None
+
+    _show_run_summary("ato", tenant, target_users, start_dt, end_dt, output_dir, case_name)
+
+    token, _ = _authenticate(tenant, client_id)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    case = Case.create(tenant, output_dir, case_name)
+    console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
+
+    case.audit.log_event("WORKFLOW_CONFIG", {
+        "workflow": "ato",
+        "tenant": tenant,
+        "start_date": start_dt.strftime(_DATE_FMT),
+        "end_date": end_dt.strftime(_DATE_FMT),
+        "users": target_users or "all",
+    })
+
+    _client_id = client_id
+    token_provider = lambda: get_token(tenant, **({'client_id': _client_id} if _client_id else {}))
+    workflow = ATOWorkflow(token, case, token_provider=token_provider)
+    result = workflow.run(
+        users=target_users,
+        tenant=tenant,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+
+    render_summary(result)
+    case.close()
+
+    if result.errors:
+        console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors. Check case_audit.txt for details.[/yellow]")
+
+    console.print("[bold green]ATO collection complete.[/bold green]")
 
 
 @run_app.command("full")
