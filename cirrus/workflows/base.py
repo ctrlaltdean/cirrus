@@ -72,9 +72,10 @@ class BaseWorkflow:
     name: str = "base"
     description: str = ""
 
-    def __init__(self, token: str, case: Case) -> None:
+    def __init__(self, token: str, case: Case, token_provider: Callable[[], str] | None = None) -> None:
         self.token = token
         self.case = case
+        self.token_provider = token_provider
 
     def run(
         self,
@@ -163,6 +164,7 @@ class BaseWorkflow:
                 )
                 collector: GraphCollector = collector_cls(self.token)
                 collector.license_profile = license_profile
+                collector.token_provider = self.token_provider
                 collector.on_status = _make_status_cb(progress, task, display_name)
 
                 # Open the NDJSON file before collection starts so records are

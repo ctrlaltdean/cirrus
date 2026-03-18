@@ -508,7 +508,9 @@ def run_bec(
         "users": target_users or "all",
     })
 
-    workflow = BECWorkflow(token, case)
+    _client_id = client_id  # capture for closure
+    token_provider = lambda: get_token(tenant, **({'client_id': _client_id} if _client_id else {}))
+    workflow = BECWorkflow(token, case, token_provider=token_provider)
     result = workflow.run(
         users=target_users,
         tenant=tenant,
@@ -581,7 +583,9 @@ def run_full(
         "users": target_users or "all",
     })
 
-    workflow = FullWorkflow(token, case)
+    _client_id = client_id  # capture for closure
+    token_provider = lambda: get_token(tenant, **({'client_id': _client_id} if _client_id else {}))
+    workflow = FullWorkflow(token, case, token_provider=token_provider)
     result = workflow.run(
         users=target_users,
         tenant=tenant,

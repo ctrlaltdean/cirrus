@@ -68,6 +68,11 @@ class GraphCollector:
         #: workflow can stream them to disk without waiting for full collection.
         self.on_page: Callable[[list[dict]], None] | None = None
 
+        #: Optional token provider. When set, a 401 response triggers a silent
+        #: token refresh (via MSAL cache) and a single retry, so long-running
+        #: operations like the UAL poll loop survive access token expiry.
+        self.token_provider: Callable[[], str] | None = None
+
     # ------------------------------------------------------------------
     # Low-level HTTP helpers
     # ------------------------------------------------------------------
@@ -88,6 +93,10 @@ class GraphCollector:
                 continue
 
             if resp.status_code == 401:
+                if self.token_provider and attempt == 1:
+                    new_token = self.token_provider()
+                    self.session.headers["Authorization"] = f"Bearer {new_token}"
+                    continue  # retry once with the fresh token
                 raise CollectorError(
                     "HTTP 401: Access token expired or insufficient permissions. "
                     "Re-authenticate with `cirrus auth login`."
@@ -135,6 +144,10 @@ class GraphCollector:
                 continue
 
             if resp.status_code == 401:
+                if self.token_provider and attempt == 1:
+                    new_token = self.token_provider()
+                    self.session.headers["Authorization"] = f"Bearer {new_token}"
+                    continue
                 raise CollectorError("HTTP 401: Access token expired.")
 
             if resp.status_code == 403:

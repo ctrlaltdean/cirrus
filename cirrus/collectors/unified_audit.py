@@ -32,9 +32,9 @@ from typing import Any
 from cirrus.collectors.base import GRAPH_BETA, CollectorError, GraphCollector
 from cirrus.utils.helpers import dt_to_odata
 
-POLL_INTERVAL = 5      # seconds between status checks
-POLL_TIMEOUT = 1800    # seconds before giving up — large tenants can take 20-30 min
-NOT_STARTED_TIMEOUT = 600  # seconds before giving up if query never leaves the queue
+POLL_INTERVAL = 5       # seconds between status checks
+POLL_TIMEOUT = 3600     # seconds before giving up — large tenants can take 30-60 min
+NOT_STARTED_TIMEOUT = 1200  # seconds before giving up if query never leaves the queue
 
 # Map Graph API UAL field names → native Search-UnifiedAuditLog PascalCase names.
 # SOF-ELK's microsoft365 pipeline expects the native field names.
@@ -121,7 +121,7 @@ class UnifiedAuditCollector(GraphCollector):
             if elapsed >= POLL_TIMEOUT:
                 raise CollectorError(
                     f"UAL query {query_id} timed out after {POLL_TIMEOUT // 60} minutes. "
-                    "Try a shorter date range or fewer users."
+                    "Try a shorter date range (--start-date / --end-date) or fewer users."
                 )
 
             status_data = self._get(status_url)
@@ -131,7 +131,11 @@ class UnifiedAuditCollector(GraphCollector):
                 break
             if status in ("failed", "cancelled"):
                 raise CollectorError(
-                    f"UAL query {query_id} ended with status '{status}'."
+                    f"UAL query {query_id} ended with status '{status}'. "
+                    "This is returned by Microsoft, not a CIRRUS timeout. "
+                    "Common causes: query date range too large, tenant throttling, "
+                    "or a transient Graph API issue. "
+                    "Try a narrower date range (--start-date / --end-date) or retry."
                 )
 
             mins, secs = divmod(int(elapsed), 60)
