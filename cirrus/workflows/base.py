@@ -236,6 +236,12 @@ class BaseWorkflow:
                 progress.update(task, completed=len(records), total=len(records))
 
         self.case.audit.log_workflow_complete(self.name, result.total_records)
+
+        # ------------------------------------------------------------------ #
+        # Post-collection: cross-collector correlation                        #
+        # ------------------------------------------------------------------ #
+        _run_correlation(self.case.case_dir, result, self.case)
+
         return result
 
     def _build_steps(
@@ -250,6 +256,40 @@ class BaseWorkflow:
         Return list of (CollectorClass, kwargs_dict, display_name).
         """
         raise NotImplementedError
+
+
+def _run_correlation(case_dir: Path, result: "WorkflowResult", case: "Case") -> None:
+    """
+    Run the cross-collector correlation engine and log the result.
+    Import is deferred to keep startup fast and avoid circular imports.
+    """
+    try:
+        from cirrus.analysis.correlator import run_correlator
+        report = run_correlator(case_dir)
+        finding_count = report["summary"]["total_findings"]
+        high_count = report["summary"].get("high", 0)
+
+        # Log to case audit
+        case.audit.log_event(
+            "correlation_complete",
+            {
+                "findings": finding_count,
+                "high": high_count,
+                "medium": report["summary"].get("medium", 0),
+                "output": str(case_dir / "ioc_correlation.json"),
+            },
+        )
+
+        if finding_count > 0:
+            label = f"[red]{finding_count}[/red]" if high_count > 0 else f"[yellow]{finding_count}[/yellow]"
+            console.print(
+                f"\n[bold]Correlation:[/bold] {label} cross-collector finding(s) — "
+                f"see [cyan]ioc_correlation.json[/cyan]"
+            )
+        else:
+            console.print("\n[bold]Correlation:[/bold] [green]No cross-collector findings.[/green]")
+    except Exception as exc:
+        console.print(f"\n[dim]Correlation skipped: {exc}[/dim]")
 
 
 def _render_license_banner(profile: TenantLicenseProfile) -> None:

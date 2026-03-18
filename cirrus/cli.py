@@ -8,8 +8,10 @@ Commands:
 
     cirrus run bec        — run BEC investigation workflow
     cirrus run full       — run full-tenant collection
-    cirrus run ato        — (roadmap)
+    cirrus run ato        — run ATO investigation workflow
+    cirrus run bec-ato    — run combined BEC+ATO full attack chain workflow
 
+    cirrus analyze        — re-run cross-collector correlation on an existing case
     cirrus case verify    — verify chain-of-custody integrity for a case folder
 
 Global options available on every command:
@@ -1379,6 +1381,81 @@ def case_list(
         table.add_row(c.name, str(artifacts), audit_ok)
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Analyze command  (re-run correlation on an existing case)
+# ---------------------------------------------------------------------------
+
+@app.command("analyze")
+def analyze(
+    case_dir: Annotated[Path, typer.Argument(help="Path to the case folder to analyze.")],
+) -> None:
+    """
+    Run the cross-collector correlation engine against an existing case folder.
+
+    Reads the collector JSON output files already present in the case directory,
+    links events across collectors, and writes ioc_correlation.json with
+    consolidated findings.
+
+    Useful when you want to re-run correlation after adding new collectors,
+    or to analyse a case that was collected outside of a workflow run.
+    """
+    _banner()
+    if not case_dir.exists() or not case_dir.is_dir():
+        console.print(f"[red]Case folder not found:[/red] {case_dir}")
+        raise typer.Exit(1)
+
+    from cirrus.analysis.correlator import run_correlator
+    console.print(f"\n[bold]Running correlation engine on:[/bold] {case_dir}\n")
+
+    report = run_correlator(case_dir)
+    summary = report["summary"]
+    findings = report["findings"]
+
+    loaded = ", ".join(report.get("collectors_loaded") or [])
+    console.print(f"[dim]Collectors loaded:[/dim] {loaded or 'none'}\n")
+
+    if not findings:
+        console.print("[green]No cross-collector findings.[/green]")
+    else:
+        table = Table(
+            title="Cross-Collector Findings",
+            border_style="bright_blue",
+            header_style="bold magenta",
+        )
+        table.add_column("ID", style="dim", width=10)
+        table.add_column("Sev", width=8)
+        table.add_column("User", style="cyan")
+        table.add_column("Title")
+
+        severity_style = {"high": "red", "medium": "yellow", "low": "dim"}
+        for f in findings:
+            sev = f["severity"]
+            sev_label = f"[{severity_style.get(sev, 'white')}]{sev.upper()}[/{severity_style.get(sev, 'white')}]"
+            table.add_row(f["id"], sev_label, f.get("user") or "—", f["title"])
+
+        console.print(table)
+        console.print(
+            f"\n[bold]Total:[/bold] {summary['total_findings']} finding(s)  "
+            f"[red]{summary.get('high', 0)} HIGH[/red]  "
+            f"[yellow]{summary.get('medium', 0)} MEDIUM[/yellow]\n"
+            f"[bold]Output:[/bold] {case_dir / 'ioc_correlation.json'}\n"
+        )
+
+        # Print details for each finding
+        for f in findings:
+            sev = f["severity"]
+            color = severity_style.get(sev, "white")
+            console.print(
+                Panel(
+                    f"[bold]{f['description']}[/bold]\n\n"
+                    f"[dim]Recommendation:[/dim] {f['recommendation']}",
+                    title=f"[{color}]{f['id']} — {f['title']}[/{color}]",
+                    border_style=color,
+                    expand=False,
+                )
+            )
 
 
 # ---------------------------------------------------------------------------

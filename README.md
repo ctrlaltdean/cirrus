@@ -661,6 +661,47 @@ Collectors annotate each record with a `_iocFlags` list. Records with flags shou
 
 ---
 
+## Cross-Collector Correlation
+
+After every workflow run, CIRRUS automatically runs a correlation engine that reads all collector output files, links events across data sources, and writes `ioc_correlation.json` to the case folder. This layer finds attack patterns that are only visible when multiple collectors are viewed together.
+
+You can also run correlation manually against any existing case:
+
+```bash
+cirrus analyze investigations/CONTOSO_20260317_143022
+```
+
+### Correlation Rules
+
+| Rule | Severity | Pattern |
+|------|----------|---------|
+| `suspicious_signin_then_persistence` | **HIGH** | Sign-in with device code / impossible travel / geo-risk + new MFA method or device registered in same window |
+| `password_reset_then_mfa_registered` | **HIGH** | Admin password reset in audit logs + new MFA method for the same user — attacker locks out victim, registers own authenticator |
+| `privilege_escalation_after_signin` | **HIGH** | Suspicious sign-in activity + high-privilege role assigned to the same user in the same window |
+| `oauth_phishing_pattern` | **HIGH** | Device code / ROPC authentication + high-risk OAuth grant (mail read, file access) for the same user |
+| `bec_attack_pattern` | **HIGH** | Any sign-in activity + inbox rule with forwarding / deletion / hiding or external SMTP forwarding for the same user |
+| `device_code_then_device_registered` | **HIGH** | Device code phishing sign-in + new device registered — attacker obtains a PRT that survives password resets |
+| `new_account_with_signin` | **MEDIUM** | Recently-created user account that has active sign-in events — potential attacker backdoor account |
+| `cross_ip_correlation` | **MEDIUM** | Same public IP appears in both sign-in logs and directory audit logs — same session or attacker source performed auth and directory changes |
+
+### Example Output
+
+```
+Cross-Collector Findings
+──────────────────────────────────────────────────────────────────────────
+  ID        Sev     User                    Title
+  CORR-001  HIGH    john@contoso.com        Suspicious sign-in followed by new persistence mechanism
+  CORR-002  HIGH    john@contoso.com        Admin password reset followed by new MFA method registration
+  CORR-003  MEDIUM  195.201.14.52           IP appears in both sign-in logs and directory audit logs
+
+Total: 3 finding(s)  3 HIGH  0 MEDIUM
+Output: investigations/CONTOSO_20260317_143022/ioc_correlation.json
+```
+
+Each finding includes the supporting evidence records from both collectors, the specific flags that triggered it, and a recommended response action.
+
+---
+
 ## Chain of Custody
 
 Every case folder contains `case_audit.jsonl` — an append-only log of every action CIRRUS took during the investigation. Each entry records:
@@ -686,7 +727,7 @@ If any entry has been modified after the fact, the hash chain will fail and CIRR
 ## Roadmap
 
 - [ ] App registration / service principal auth (`--client-id` / `--client-secret`)
-- [ ] Cross-collector correlation engine (post-collection IOC timeline linking findings across collectors)
+- [x] Cross-collector correlation engine (8 rules, auto-runs after every workflow; `cirrus analyze` for manual re-run)
 - [ ] HTML investigation report with timeline visualization
 - [ ] SIEM export (CEF, Splunk HEC, Microsoft Sentinel)
 - [ ] Additional detection / analysis rules
