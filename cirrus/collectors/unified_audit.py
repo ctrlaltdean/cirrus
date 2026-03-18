@@ -32,8 +32,9 @@ from typing import Any
 from cirrus.collectors.base import GRAPH_BETA, CollectorError, GraphCollector
 from cirrus.utils.helpers import dt_to_odata
 
-POLL_INTERVAL = 5    # seconds between status checks
-POLL_TIMEOUT = 1800  # seconds before giving up — large tenants can take 20-30 min
+POLL_INTERVAL = 5      # seconds between status checks
+POLL_TIMEOUT = 1800    # seconds before giving up — large tenants can take 20-30 min
+NOT_STARTED_TIMEOUT = 600  # seconds before giving up if query never leaves the queue
 
 # Map Graph API UAL field names → native Search-UnifiedAuditLog PascalCase names.
 # SOF-ELK's microsoft365 pipeline expects the native field names.
@@ -113,10 +114,15 @@ class UnifiedAuditCollector(GraphCollector):
         # Poll for completion using wall-clock time so API latency is included.
         status_url = f"{GRAPH_BETA}/security/auditLog/queries/{query_id}"
         poll_start = time.monotonic()
+        not_started_since: float | None = None
+
         while True:
             elapsed = time.monotonic() - poll_start
             if elapsed >= POLL_TIMEOUT:
-                break
+                raise CollectorError(
+                    f"UAL query {query_id} timed out after {POLL_TIMEOUT // 60} minutes. "
+                    "Try a shorter date range or fewer users."
+                )
 
             status_data = self._get(status_url)
             status = status_data.get("status", "").lower()
@@ -128,27 +134,35 @@ class UnifiedAuditCollector(GraphCollector):
                     f"UAL query {query_id} ended with status '{status}'."
                 )
 
-            if self.on_status:
-                mins, secs = divmod(int(elapsed), 60)
-                elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-                if status == "notstarted":
-                    self.on_status(
-                        f"query queued on Microsoft's servers — {elapsed_str} elapsed "
-                        f"(this is normal, waiting for processing to begin)"
+            mins, secs = divmod(int(elapsed), 60)
+            elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+
+            if status == "notstarted":
+                if not_started_since is None:
+                    not_started_since = time.monotonic()
+                not_started_elapsed = time.monotonic() - not_started_since
+                if not_started_elapsed >= NOT_STARTED_TIMEOUT:
+                    raise CollectorError(
+                        f"UAL query {query_id} has been queued for over "
+                        f"{NOT_STARTED_TIMEOUT // 60} minutes without starting. "
+                        "This usually means Microsoft's UAL search service is degraded "
+                        "or this tenant has too many concurrent queries running. "
+                        "Check the M365 Service Health dashboard, then retry with a "
+                        "narrower date range (--start-date / --end-date)."
                     )
-                else:
+                if self.on_status:
+                    self.on_status(
+                        f"query queued — {elapsed_str} elapsed "
+                        f"(waiting for Microsoft to begin processing)"
+                    )
+            else:
+                not_started_since = None  # reset if status advances
+                if self.on_status:
                     self.on_status(
                         f"query {status or 'running'} — {elapsed_str} elapsed"
                     )
 
             time.sleep(POLL_INTERVAL)
-
-        elapsed = time.monotonic() - poll_start
-        if elapsed >= POLL_TIMEOUT:
-            raise CollectorError(
-                f"UAL query {query_id} timed out after {POLL_TIMEOUT}s. "
-                "Try a shorter date range or fewer users."
-            )
 
         if self.on_status:
             self.on_status("query complete — fetching records...")

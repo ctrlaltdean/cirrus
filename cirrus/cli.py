@@ -1021,8 +1021,12 @@ def case_list(
     table.add_column("Audit Log")
 
     for c in cases:
-        artifacts = len(list(c.glob("*.json"))) - 1  # exclude case_audit.jsonl... actually .jsonl
-        artifacts = len(list(c.glob("*.json")))
+        # Count .json files (case_audit.jsonl doesn't match *.json).
+        # Also count .ndjson files separately since they appear first during
+        # streaming — a partial run may have .ndjson but no .json yet.
+        json_count = len(list(c.glob("*.json")))
+        ndjson_count = len(list(c.glob("*.ndjson")))
+        artifacts = max(json_count, ndjson_count)
         audit_ok = "✓" if (c / "case_audit.jsonl").exists() else "✗"
         table.add_row(c.name, str(artifacts), audit_ok)
 
