@@ -55,11 +55,17 @@ CIRRUS is a command-line tool for collecting forensic artifacts from Microsoft 3
 
 ## Quick Start
 
+**Scripted (all flags provided — no prompts):**
 ```
-cirrus run bec --tenant contoso.com --user john@contoso.com
+cirrus run bec --tenant contoso.com --user john@contoso.com --days 30
 ```
 
-That's it. CIRRUS opens a browser for authentication, collects all BEC-relevant artifacts for the target user, flags IOCs, writes JSON and CSV output, and records a chain-of-custody log. The whole run takes under two minutes on a typical tenant.
+**Interactive wizard (run with no flags):**
+```
+cirrus run bec
+```
+
+CIRRUS opens a browser for authentication, collects all BEC-relevant artifacts for the target user, flags IOCs, and writes JSON, CSV, and NDJSON output with a chain-of-custody log. UAL queries on large tenants may take 15–30 minutes depending on tenant size and Microsoft's service queue.
 
 ---
 
@@ -177,29 +183,32 @@ Tenant license profile:  Entra ID P1 ✓   Entra ID P2 ✗   M365 Advanced Audit
   ↳ UAL will run — MailItemsAccessed requires E5/Audit Premium (Send and other events are available on all plans)
 ```
 
+**Interactive wizard** — run with no arguments and CIRRUS walks you through every option:
 ```bash
-# Single user — most common
-cirrus run bec --tenant contoso.com --user john@contoso.com
-
-# Multiple users
-cirrus run bec --tenant contoso.com \
-  --users john@contoso.com \
-  --users jane@contoso.com
-
-# Load targets from a text file (one UPN per line)
-cirrus run bec --tenant contoso.com --users-file targets.txt
-
-# Extend the collection window
-cirrus run bec --tenant contoso.com --user john@contoso.com --days 90
-
-# Custom case name for your ticketing system
-cirrus run bec --tenant contoso.com --user john@contoso.com --case-name INC-2026-042
-
-# Custom output directory
-cirrus run bec --tenant contoso.com --user john@contoso.com --output-dir D:\Cases
+cirrus run bec
 ```
 
-If you run `cirrus run bec --tenant contoso.com` without specifying a user, CIRRUS will prompt you interactively to choose a targeting method.
+**Scripted examples:**
+```bash
+# Single user, last 30 days
+cirrus run bec --tenant contoso.com --user john@contoso.com --days 30
+
+# Multiple users, explicit date range
+cirrus run bec --tenant contoso.com \
+  --users john@contoso.com \
+  --users jane@contoso.com \
+  --start-date 2026-03-01 --end-date 2026-03-18
+
+# Load targets from a text file (one UPN per line, # comments ignored)
+cirrus run bec --tenant contoso.com --users-file targets.txt --days 14
+
+# All users in the tenant
+cirrus run bec --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-18
+
+# Custom case name and output directory
+cirrus run bec --tenant contoso.com --user john@contoso.com \
+  --case-name INC-2026-042 --output-dir D:\Cases
+```
 
 ---
 
@@ -439,21 +448,100 @@ UAL records are normalized to match native `Search-UnifiedAuditLog` field names 
 
 ## IOC Flags
 
-Collectors annotate each record with a `_iocFlags` list. Records with flags should be reviewed first. The `_iocFlags` field appears in both JSON and CSV output.
+Collectors annotate each record with a `_iocFlags` list. Records with flags should be reviewed first. The `_iocFlags` field appears in JSON, CSV, and NDJSON output.
 
-| Flag | Collector | Meaning |
-|------|-----------|---------|
-| `EXTERNAL_SMTP_FORWARD:<addr>` | Mail Forwarding | Mailbox forwards to an external address |
-| `NO_LOCAL_COPY:victim_receives_nothing` | Mail Forwarding | Forwarding set and `DeliverToMailboxAndForward = false` |
-| `FORWARDS_TO:<addr>` | Mailbox Rules | Inbox rule forwards to external address |
-| `PERMANENT_DELETE` | Mailbox Rules | Rule permanently deletes matching mail |
-| `MARKS_AS_READ` | Mailbox Rules | Rule silently marks mail as read |
-| `SUSPICIOUS_KEYWORD:<kw>` | Mailbox Rules | Rule condition matches finance/phishing keyword |
-| `HIGH_RISK_SCOPE:<scope>` | OAuth Grants | App has a high-risk permission (Mail.Read, etc.) |
-| `NO_MFA_REQUIREMENT` | Conditional Access | Policy does not require MFA |
-| `POLICY_DISABLED` | Conditional Access | CA policy is disabled |
-| `NO_VERIFIED_PUBLISHER` | Service Principals | App has no verified publisher |
-| `MANY_CREDENTIALS:<n>` | Service Principals | App has an unusual number of client secrets/certs |
+### Sign-In Logs
+
+| Flag | Meaning |
+|------|---------|
+| `LEGACY_AUTH:<protocol>` | Sign-in used a legacy protocol (IMAP, POP3, SMTP, EAS, MAPI, BasicAuth) — cannot enforce MFA or Conditional Access |
+| `SUSPICIOUS_AUTH_PROTOCOL:deviceCode` | Device code flow — primary technique in token-theft phishing (attacker tricks user into authorising an attacker-controlled session) |
+| `SUSPICIOUS_AUTH_PROTOCOL:ropc` | Resource Owner Password Credentials — password submitted directly to the token endpoint, bypasses MFA entirely |
+| `SINGLE_FACTOR_SUCCESS` | Sign-in succeeded with only one authentication factor |
+| `CA_POLICY_FAILURE` | Conditional Access policy blocked or failed |
+| `RISK_LEVEL:<high\|medium>` | Microsoft Identity Protection aggregate risk score |
+| `RISK_STATE:<state>` | `atRisk` or `confirmedCompromised` per Identity Protection |
+| `GEO_RISK:<detail>` | Geolocation risk signal from Identity Protection: `anonymizedIPAddress` (Tor/VPN/proxy), `maliciousIPAddress`, `impossibleTravel`, `newCountry`, `unfamiliarFeatures` |
+| `IDENTITY_RISK:<detail>` | Identity risk signal: `leakedCredentials`, `anomalousToken`, `suspiciousBrowser`, `suspiciousInboxForwarding`, etc. |
+| `FAILED_SIGNIN:<reason>` | Sign-in failed — includes the failure reason string |
+| `FLAGGED_FOR_REVIEW` | Microsoft flagged this sign-in for analyst review |
+| `PUBLIC_IP:<ip>` | Non-RFC1918 source IP — paste directly into VirusTotal, Shodan, or AbuseIPDB |
+| `COUNTRY:<country>` | Sign-in country — always tagged for geographic pivot and filtering |
+| `CITY:<city>` | Sign-in city — always tagged |
+| `IMPOSSIBLE_TRAVEL:<A->B:Xh>` | **Cross-record detection** — same user signed in from two different countries within 2 hours (does not require Identity Protection licensing) |
+
+### Entra Directory Audit Logs
+
+| Flag | Meaning |
+|------|---------|
+| `MFA_METHOD_ADDED` | User registered a new MFA / security info method — classic BEC persistence |
+| `MFA_METHOD_REMOVED` | MFA method deleted — attacker removing victim's recovery options |
+| `MFA_REGISTRATION_COMPLETE` | User completed full MFA registration |
+| `MFA_SETTINGS_CHANGED` | `StrongAuthentication` property modified via an Update user event |
+| `ADMIN_PASSWORD_RESET` | An admin reset a user's password — could be attacker locking victim out or legitimate IR |
+| `USER_PASSWORD_CHANGE` | User changed their own password |
+| `USER_CREATED` | New user account added to the directory |
+| `USER_DELETED` | User account deleted |
+| `USER_DISABLED` | User sign-in blocked |
+| `USER_ENABLED` | User sign-in unblocked |
+| `ROLE_ASSIGNMENT:<role>` | A role was assigned to a user or principal |
+| `HIGH_PRIV_ROLE_ASSIGNED:<role>` | Assignment of a high-privilege role (Global Admin, Exchange Admin, Security Admin, etc.) |
+| `ROLE_REMOVAL:<role>` | A role was removed |
+| `APP_CONSENT_GRANTED` | User or admin consented to an application — OAuth phishing indicator |
+| `OAUTH_PERMISSION_CHANGED` | OAuth delegated permission grant added or updated |
+| `CA_POLICY_ADDED` | New Conditional Access policy created |
+| `CA_POLICY_UPDATED` | Existing CA policy modified |
+| `CA_POLICY_DELETED` | CA policy removed |
+| `APP_REGISTRATION_CREATED` | New app registration added to the tenant |
+| `APP_REGISTRATION_UPDATED` | App registration modified (secrets, certificates) |
+| `SERVICE_PRINCIPAL_ADDED` | New service principal added |
+| `APP_OWNER_ADDED` | Owner added to an application registration |
+| `OPERATION_FAILED:<activity>` | Audit event recorded a `failure` or `timeout` result |
+| `PUBLIC_IP:<ip>` | Initiating IP extracted from `additionalDetails` |
+
+### Mailbox Rules
+
+| Flag | Meaning |
+|------|---------|
+| `FORWARDS_TO:<addr>` | Rule forwards matching mail to an address |
+| `PERMANENT_DELETE` | Rule permanently deletes matching mail |
+| `MARKS_AS_READ` | Rule silently marks mail as read — victim sees no unread badge |
+| `MOVES_TO_HIDDEN_FOLDER:<folder>` | Rule moves mail to Deleted Items, Junk, or RSS folders |
+| `SUSPICIOUS_KEYWORD:<kw>` | Rule condition matches a finance or phishing keyword (invoice, wire, payment, etc.) |
+
+### Mail Forwarding
+
+| Flag | Meaning |
+|------|---------|
+| `EXTERNAL_SMTP_FORWARD:<addr>` | Mailbox SMTP forwarding points to an external address |
+| `INTERNAL_SMTP_FORWARD:<addr>` | Mailbox SMTP forwarding points to an internal address |
+| `FORWARDING_ADDRESS:<addr>` | Forwarding address object configured on the mailbox |
+| `NO_LOCAL_COPY:victim_receives_nothing` | Forwarding is set and `DeliverToMailboxAndForward = false` — victim never sees the mail |
+
+### OAuth Grants
+
+| Flag | Meaning |
+|------|---------|
+| `HIGH_RISK_SCOPE:<scope>` | App holds a high-risk delegated permission: `Mail.Read`, `Mail.ReadWrite`, `Files.ReadWrite.All`, `Directory.ReadWrite.All`, `full_access_as_user`, `offline_access`, etc. |
+
+### Conditional Access Policies
+
+| Flag | Meaning |
+|------|---------|
+| `POLICY_DISABLED` | CA policy exists but is in disabled state |
+| `POLICY_REPORT_ONLY` | CA policy is in report-only mode — not enforced |
+| `NO_MFA_REQUIREMENT` | Policy has grant controls but does not require MFA |
+| `EXCLUDES_USERS:<n>` | Policy excludes N specific users from scope |
+| `EXCLUDES_GROUPS:<n>` | Policy excludes N groups from scope |
+
+### Service Principals
+
+| Flag | Meaning |
+|------|---------|
+| `NO_VERIFIED_PUBLISHER` | App has no verified publisher — unverified third-party app |
+| `MANY_CREDENTIALS:<n>` | App has an unusually high number of client secrets or certificates |
+| `LOCALHOST_REPLY_URL:<url>` | App has a localhost redirect URI — unusual in production apps |
+| `DISABLED_WITH_CREDENTIALS` | Disabled service principal still has active credentials |
 
 ---
 
