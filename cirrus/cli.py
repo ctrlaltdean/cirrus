@@ -11,6 +11,7 @@ Commands:
     cirrus run ato        — run ATO investigation workflow
     cirrus run bec-ato    — run combined BEC+ATO full attack chain workflow
 
+    cirrus triage         — quick targeted checks on a suspected compromised account
     cirrus analyze        — re-run cross-collector correlation on an existing case
     cirrus case verify    — verify chain-of-custody integrity for a case folder
 
@@ -1385,6 +1386,177 @@ def case_list(
 
 # ---------------------------------------------------------------------------
 # Analyze command  (re-run correlation on an existing case)
+# ---------------------------------------------------------------------------
+# Triage command  (quick per-user checks, no case folder)
+# ---------------------------------------------------------------------------
+
+TenantOpt  = Annotated[Optional[str], typer.Option("--tenant",  help="Tenant domain or GUID.")]
+DaysTriOpt = Annotated[int,           typer.Option("--days",    help="How many days back to check (default 7).")]
+
+
+@app.command("triage")
+def triage(
+    tenant: TenantOpt = None,
+    user:   Annotated[Optional[str], typer.Option("--user",  help="UPN of the suspected compromised account.")] = None,
+    users:  Annotated[Optional[list[str]], typer.Option("--users", help="Multiple UPNs (repeat flag).")] = None,
+    users_file: Annotated[Optional[Path], typer.Option("--users-file", help="File with one UPN per line.")] = None,
+    days:   DaysTriOpt = 7,
+) -> None:
+    """
+    Run quick targeted checks on a suspected compromised account.
+
+    Checks MFA methods, inbox rules, mail forwarding, OAuth grants, registered
+    devices, sign-in locations, directory audit changes, and Identity Protection
+    risk — all in parallel. Results display immediately. No case folder created.
+
+    Use this for fast first-look triage before committing to a full workflow run.
+
+    \\b
+    Examples:
+        cirrus triage --tenant contoso.com --user john@contoso.com
+        cirrus triage --tenant contoso.com --user john@contoso.com --days 14
+        cirrus triage --tenant contoso.com --users-file suspects.txt
+    """
+    from rich.table import Table as RichTable
+    from rich.panel import Panel as RichPanel
+
+    _banner()
+
+    # ── Tenant & auth ──────────────────────────────────────────────────────
+    if tenant is None:
+        tenant = _prompt_tenant()
+
+    token, username = _authenticate(tenant)
+
+    # ── Resolve user list ──────────────────────────────────────────────────
+    target_users: list[str] = []
+    if user:
+        v = _validate_upn(user)
+        if v:
+            target_users.append(v)
+        else:
+            console.print(f"[red]Invalid UPN:[/red] {user}")
+            raise typer.Exit(1)
+    if users:
+        for u in users:
+            v = _validate_upn(u)
+            if v:
+                target_users.append(v)
+    if users_file:
+        if not users_file.exists():
+            console.print(f"[red]File not found:[/red] {users_file}")
+            raise typer.Exit(1)
+        for line in users_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                v = _validate_upn(line)
+                if v:
+                    target_users.append(v)
+
+    if not target_users:
+        target_users = [Prompt.ask(
+            "\n[bold]Target user[/bold] [dim](UPN — e.g. john@contoso.com)[/dim]"
+        ).strip()]
+        v = _validate_upn(target_users[0])
+        if not v:
+            console.print("[red]Invalid UPN format.[/red]")
+            raise typer.Exit(1)
+        target_users = [v]
+
+    target_users = list(dict.fromkeys(target_users))  # deduplicate, preserve order
+
+    # ── Run triage for each user ───────────────────────────────────────────
+    from cirrus.analysis.triage import run_triage
+
+    for upn in target_users:
+        console.print(
+            f"\n[bold]Running triage:[/bold]  {upn}  "
+            f"[dim](last {days} day{'s' if days != 1 else ''})[/dim]\n"
+        )
+
+        with console.status(f"[dim]Running {8} checks in parallel...[/dim]"):
+            report = run_triage(token=token, upn=upn, days=days)
+
+        _render_triage_report(report)
+
+        if len(target_users) > 1:
+            console.print()
+
+
+def _render_triage_report(report: "TriageReport") -> None:
+    """Render a triage report to the terminal using Rich."""
+    from cirrus.analysis.triage import TriageReport
+
+    STATUS_ICON  = {"high": "[red]✗[/red]",   "warn": "[yellow]⚠[/yellow]",
+                    "clean": "[green]✓[/green]", "error": "[dim]![/dim]",
+                    "skipped": "[dim]–[/dim]"}
+    STATUS_LABEL = {"high": "[red]HIGH[/red]",   "warn": "[yellow]WARN[/yellow]",
+                    "clean": "[green]CLEAN[/green]", "error": "[dim]ERROR[/dim]",
+                    "skipped": "[dim]SKIP[/dim]"}
+
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        border_style="bright_blue",
+        show_lines=False,
+        box=None,
+        pad_edge=True,
+    )
+    table.add_column("", width=3, no_wrap=True)
+    table.add_column("Check", style="bold", min_width=22, no_wrap=True)
+    table.add_column("Status", width=10, no_wrap=True)
+    table.add_column("Summary")
+
+    for check in report.checks:
+        icon  = STATUS_ICON.get(check.status, "?")
+        label = STATUS_LABEL.get(check.status, check.status)
+        table.add_row(icon, check.label, label, check.summary)
+
+    console.print(table)
+
+    # Detail bullets for flagged checks
+    for check in report.checks:
+        if check.detail and check.status in ("high", "warn"):
+            console.print(f"\n  [bold]{check.label}[/bold]")
+            for line in check.detail[:6]:
+                color = "red" if any(
+                    line.startswith(p) for p in (
+                        "HIGH_", "SUSPICIOUS_", "IMPOSSIBLE_", "EXTERNAL_", "NO_LOCAL_",
+                        "USABLE_", "ADMIN_PASSWORD", "APP_CONSENT", "RISK_STATE:",
+                    )
+                ) else "yellow"
+                console.print(f"    [{color}]→[/{color}] {line}")
+
+    # Verdict
+    verdict = report.verdict
+    flagged = report.flagged_count
+    total   = len([c for c in report.checks if c.status != "skipped"])
+
+    console.print()
+    if verdict == "high":
+        verdict_str = f"[bold red]HIGH RISK[/bold red]"
+    elif verdict == "warn":
+        verdict_str = f"[bold yellow]SUSPICIOUS[/bold yellow]"
+    else:
+        verdict_str = f"[bold green]CLEAN[/bold green]"
+
+    console.print(
+        Panel(
+            f"[bold]User:[/bold] {report.user}   "
+            f"[bold]Window:[/bold] last {report.days} days   "
+            f"[bold]Verdict:[/bold] {verdict_str}   "
+            f"[dim]{flagged}/{total} checks flagged[/dim]"
+            + (
+                f"\n\n[dim]Recommended next step:[/dim]\n"
+                f"  [cyan]cirrus run ato --tenant <tenant> --user {report.user} --days 30[/cyan]"
+                if verdict in ("high", "warn") else ""
+            ),
+            border_style="red" if verdict == "high" else ("yellow" if verdict == "warn" else "green"),
+            expand=False,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 
 @app.command("analyze")

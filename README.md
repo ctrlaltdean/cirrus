@@ -284,6 +284,58 @@ cirrus run bec-ato --tenant contoso.com \
 
 ---
 
+#### Quick Triage
+
+Runs 8 targeted checks on a suspected compromised account in parallel. No case folder is created — results display directly in the terminal in seconds. Use this for rapid first-look assessment before deciding whether to run a full workflow.
+
+**Checks run (in parallel):**
+
+| Check | What it looks for |
+|---|---|
+| Sign-in activity | Unusual countries, impossible travel, device code/ROPC, legacy auth, risk signals |
+| MFA methods | Recently added methods, FIDO2 keys, external email OTP, multiple authenticator apps |
+| Inbox rules | Forwarding rules, permanent delete, hidden-folder rules, finance keywords |
+| Mail forwarding | External SMTP forward, no-local-copy configuration |
+| OAuth grants | High-risk scopes (Mail.Read, Files.ReadWrite.All, full_access_as_user, etc.) |
+| Registered devices | Recently registered, personal/BYOD devices |
+| Directory audit | MFA changes, admin password resets, role assignments in the window |
+| Identity Protection | Risk state and risk level (skipped gracefully if no Entra ID P2) |
+
+```bash
+# Single user, last 7 days (default)
+cirrus triage --tenant contoso.com --user john@contoso.com
+
+# Wider window
+cirrus triage --tenant contoso.com --user john@contoso.com --days 14
+
+# Multiple users
+cirrus triage --tenant contoso.com --users john@contoso.com --users jane@contoso.com
+
+# From a file
+cirrus triage --tenant contoso.com --users-file suspects.txt
+
+# Interactive wizard
+cirrus triage
+```
+
+**Sample output:**
+```
+  ✗  Sign-in activity    HIGH    8 sign-ins · 2 countries · 1 suspicious
+  ✗  MFA methods         HIGH    3 methods — NEW: fido2_key added 2026-03-15
+  ✗  Inbox rules         HIGH    2 rules — forwards to attacker@gmail.com
+  ✓  Mail forwarding     CLEAN   No forwarding configured
+  ⚠  OAuth grants        WARN    Mail.Read · offline_access
+  ✓  Registered devices  CLEAN   2 devices · no recent additions
+  ⚠  Directory audit     WARN    MFA_METHOD_ADDED, ADMIN_PASSWORD_RESET
+  ✓  Identity Protection CLEAN   Risk state: none
+
+╭─ Verdict: HIGH RISK   4/7 checks flagged ─────────────────────────────────╮
+│  Recommended: cirrus run ato --tenant contoso.com --user john@contoso.com  │
+╰────────────────────────────────────────────────────────────────────────────╯
+```
+
+---
+
 #### Full Tenant Collection
 
 Sweeps the entire tenant for all supported artifact types. Use when the compromised account is not yet identified, or for proactive threat hunting.
