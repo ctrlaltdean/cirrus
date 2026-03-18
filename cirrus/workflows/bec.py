@@ -50,7 +50,7 @@ class BECWorkflow(BaseWorkflow):
         return [
             (
                 UsersCollector,
-                {"users": users},
+                {"users": users, "start_dt": start_dt},
                 "Resolving target user(s)",
             ),
             (
@@ -75,7 +75,7 @@ class BECWorkflow(BaseWorkflow):
             ),
             (
                 MFAMethodsCollector,
-                {"users": users},
+                {"users": users, "start_dt": start_dt},
                 "MFA / authentication methods",
             ),
             (

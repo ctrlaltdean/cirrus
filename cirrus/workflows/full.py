@@ -46,7 +46,7 @@ class FullWorkflow(BaseWorkflow):
         return [
             (
                 UsersCollector,
-                {"users": users},
+                {"users": users, "start_dt": start_dt},
                 "User directory",
             ),
             (
@@ -71,7 +71,7 @@ class FullWorkflow(BaseWorkflow):
             ),
             (
                 MFAMethodsCollector,
-                {"users": users},
+                {"users": users, "start_dt": start_dt},
                 "MFA / authentication methods",
             ),
             (

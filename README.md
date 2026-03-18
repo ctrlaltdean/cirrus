@@ -39,6 +39,8 @@ CIRRUS is a command-line tool for collecting forensic artifacts from Microsoft 3
 | Feature | Description |
 |---|---|
 | **BEC Workflow** | Targeted 10-step collection for Business Email Compromise investigations |
+| **ATO Workflow** | 11-step Account Takeover investigation — authentication layer, persistence, and exfiltration |
+| **BEC+ATO Workflow** | Combined 13-step full attack chain — most BEC incidents begin with an ATO event |
 | **Full Tenant Sweep** | Complete collection across all supported data sources |
 | **CIS Compliance Audit** | 34 checks against CIS M365 & Entra ID Benchmarks with wizard UI |
 | **License-Aware Collection** | Detects tenant license tier (P1/P2/E5) and gracefully skips unsupported endpoints |
@@ -212,6 +214,76 @@ cirrus run bec --tenant contoso.com --user john@contoso.com \
 
 ---
 
+#### ATO — Account Takeover
+
+Focuses on the authentication layer — how the attacker got in, what persistence mechanisms they left behind, and what they accessed. Use when you have a known or suspected compromised account and want to assess the full blast radius.
+
+**What it collects:**
+1. Target user details (flags recently created accounts, guest accounts)
+2. Sign-in logs — authentication timeline with IOC flags for legacy auth, device code phishing, impossible travel
+3. Entra directory audit logs — MFA changes, password resets, role assignments, CA policy changes
+4. MFA / authentication methods — look for attacker-added FIDO2 keys, authenticator apps, phone numbers
+5. Risky user scores (Identity Protection) — *requires Entra ID P2*
+6. Risky sign-in events — *requires Entra ID P2*
+7. Conditional Access policies — what enforcement was in place; explains how entry was possible
+8. Registered devices — PRT-bearing devices added during the window survive password resets
+9. OAuth app grants — malicious app consent that persists after credential reset
+10. App registrations — new apps created in the tenant; common attacker persistence mechanism
+11. Unified Audit Log — MailItemsAccessed, file downloads, sharing events
+
+```bash
+# Single user, last 30 days
+cirrus run ato --tenant contoso.com --user john@contoso.com --days 30
+
+# Date range
+cirrus run ato --tenant contoso.com --user john@contoso.com \
+  --start-date 2026-03-01 --end-date 2026-03-18
+
+# All users (broad incident, compromised account not yet identified)
+cirrus run ato --tenant contoso.com --all-users --days 14
+```
+
+---
+
+#### BEC+ATO — Combined Full Attack Chain
+
+Most BEC incidents begin with an ATO event. This workflow combines both investigations into a single run — shared collectors (sign-in logs, audit logs, UAL) run exactly once, with no duplication.
+
+**Covers:**
+- **ATO phase** — initial access, persistence (devices, MFA, OAuth, app registrations)
+- **BEC phase** — mailbox manipulation (rules, forwarding, wire fraud enablement)
+- **Overlap** — sign-in logs, audit events, and UAL cover both phases
+
+```bash
+# Full attack chain investigation
+cirrus run bec-ato --tenant contoso.com --user john@contoso.com --days 30
+
+# Date range
+cirrus run bec-ato --tenant contoso.com \
+  --users john@contoso.com --users jane@contoso.com \
+  --start-date 2026-03-01 --end-date 2026-03-18
+```
+
+#### Workflow Comparison
+
+| | BEC | ATO | BEC+ATO | Full |
+|--|-----|-----|---------|------|
+| Users | ✓ | ✓ | ✓ | ✓ |
+| Sign-in logs | ✓ | ✓ | ✓ | ✓ |
+| Entra audit logs | ✓ | ✓ | ✓ | ✓ |
+| MFA methods | ✓ | ✓ | ✓ | ✓ |
+| Risky users / sign-ins | ✓ | ✓ | ✓ | ✓ |
+| Conditional Access | | ✓ | ✓ | ✓ |
+| Registered devices | | ✓ | ✓ | |
+| OAuth grants | ✓ | ✓ | ✓ | ✓ |
+| App registrations | | ✓ | ✓ | |
+| Mailbox rules | ✓ | | ✓ | ✓ |
+| Mail forwarding | ✓ | | ✓ | ✓ |
+| UAL | ✓ | ✓ | ✓ | ✓ |
+| Service principals | | | | ✓ |
+
+---
+
 #### Full Tenant Collection
 
 Sweeps the entire tenant for all supported artifact types. Use when the compromised account is not yet identified, or for proactive threat hunting.
@@ -226,7 +298,7 @@ cirrus run full --tenant contoso.com --all-users --days 90
 cirrus run full --tenant contoso.com --users-file vip_users.txt
 ```
 
-> **Note:** Full tenant sweeps on large tenants (1000+ users) can take 15–30 minutes and generate large output files. Consider using the BEC workflow with targeted users first if a compromised account is known.
+> **Note:** Full tenant sweeps on large tenants (1000+ users) can take 15–30 minutes and generate large output files. Consider using the BEC or ATO workflow with targeted users first if a compromised account is known.
 
 ---
 
@@ -405,12 +477,14 @@ investigations/
     ├── risky_users.json / .csv / .ndjson
     ├── risky_signins.json / .csv / .ndjson
     ├── mfa_methods.json / .csv / .ndjson
+    ├── registered_devices.json / .csv / .ndjson   ← ATO / BEC+ATO workflows
+    ├── app_registrations.json / .csv / .ndjson    ← ATO / BEC+ATO workflows
     ├── mailbox_rules.json / .csv / .ndjson
     ├── mail_forwarding.json / .csv / .ndjson
     ├── oauth_grants.json / .csv / .ndjson
     ├── conditional_access_policies.json / .csv / .ndjson
-    ├── service_principals.json / .csv / .ndjson
-    ├── unified_audit_log.json / .csv / .ndjson   ← UAL NDJSON is SOF-ELK normalized
+    ├── service_principals.json / .csv / .ndjson   ← full workflow only
+    ├── unified_audit_log.json / .csv / .ndjson    ← UAL NDJSON is SOF-ELK normalized
     │
     └── compliance_audit.json / .csv / .txt        ← audit workflow only
 ```
@@ -524,6 +598,48 @@ Collectors annotate each record with a `_iocFlags` list. Records with flags shou
 |------|---------|
 | `HIGH_RISK_SCOPE:<scope>` | App holds a high-risk delegated permission: `Mail.Read`, `Mail.ReadWrite`, `Files.ReadWrite.All`, `Directory.ReadWrite.All`, `full_access_as_user`, `offline_access`, etc. |
 
+### Users
+
+| Flag | Meaning |
+|------|---------|
+| `RECENTLY_CREATED:<date>` | Account created within the collection window — attacker backdoor account indicator |
+| `GUEST_ACCOUNT` | B2B guest account — commonly over-permissioned; attacker may have invited an external account they control |
+| `ACCOUNT_DISABLED` | Account is blocked from sign-in — check sign-in logs for activity that predates the disable event |
+| `NO_ASSIGNED_LICENSES` | No license assigned — service accounts and orphaned accounts are commonly targeted or created by attackers |
+| `EXTERNAL_IDENTITY:<provider>` | Account federated to an external identity provider (Google, Facebook, external Azure AD, email OTP) — may bypass Conditional Access policies |
+
+### MFA / Authentication Methods
+
+| Flag | Meaning |
+|------|---------|
+| `HIGH_PERSISTENCE_METHOD:<type>` | FIDO2 key or certificate registered — hard to detect, survives password resets, requires physical possession or PKI to abuse |
+| `RECENTLY_ADDED:<date>` | Method was added within the collection window — classic attacker persistence after account compromise |
+| `EXTERNAL_EMAIL_OTP:<domain>` | Email OTP address is on a different domain from the user's UPN — strong indicator of attacker-controlled recovery address |
+| `USABLE_TEMP_ACCESS_PASS` | Active Temporary Access Pass — can be used right now to authenticate without a password or MFA |
+| `MULTIPLE_AUTHENTICATOR_APPS:<n>` | **Cross-record flag** — user has N authenticator apps registered; legitimate users rarely need more than one |
+| `MULTIPLE_PHONE_NUMBERS:<n>` | **Cross-record flag** — user has N phone numbers registered |
+
+### Registered Devices
+
+| Flag | Meaning |
+|------|---------|
+| `RECENTLY_REGISTERED:<date>` | Device registered within the collection window — PRT-bearing devices added after compromise survive password resets |
+| `PERSONAL_DEVICE` | Workplace-joined personal device (BYOD) — trust type `Workplace` — lower security posture |
+| `UNMANAGED_DEVICE` | Device not enrolled in Intune MDM management |
+| `NON_COMPLIANT` | Device is enrolled but marked non-compliant with Intune compliance policies |
+
+### App Registrations
+
+| Flag | Meaning |
+|------|---------|
+| `RECENTLY_CREATED:<date>` | App registration created within the collection window — common attacker persistence mechanism |
+| `NO_VERIFIED_PUBLISHER` | App has no verified publisher — unverified third-party or tenant-internal app |
+| `MULTI_TENANT` | App is configured for multi-tenant access — can accept tokens from any Azure AD tenant |
+| `HAS_APP_PERMISSIONS` | App holds application (Role) permissions — can act without a signed-in user |
+| `HAS_CLIENT_SECRETS:<n>` | App has N client secrets — credentials for non-interactive authentication |
+| `HAS_CERTIFICATES:<n>` | App has N certificate credentials — certificate-based non-interactive authentication |
+| `LOCALHOST_REDIRECT` | App has a localhost redirect URI — unusual in production; may indicate developer abuse or attacker-controlled app |
+
 ### Conditional Access Policies
 
 | Flag | Meaning |
@@ -570,10 +686,14 @@ If any entry has been modified after the fact, the hash chain will fail and CIRR
 ## Roadmap
 
 - [ ] App registration / service principal auth (`--client-id` / `--client-secret`)
-- [ ] Account Takeover (ATO) investigation workflow
+- [ ] Cross-collector correlation engine (post-collection IOC timeline linking findings across collectors)
 - [ ] HTML investigation report with timeline visualization
 - [ ] SIEM export (CEF, Splunk HEC, Microsoft Sentinel)
 - [ ] Additional detection / analysis rules
+- [x] Account Takeover (ATO) investigation workflow
+- [x] BEC+ATO combined full attack chain workflow
+- [x] Registered devices and app registrations collectors
+- [x] IOC flagging across all collectors (sign-in, audit, MFA, users, devices, app registrations)
 - [x] Exchange Online automated checks (PS batch via `ExchangeOnlineManagement`)
 - [x] Teams automated checks (PS batch via `MicrosoftTeams`)
 - [x] SharePoint automated checks (PS batch via `Microsoft.Online.SharePoint.PowerShell`)
