@@ -35,11 +35,21 @@ _LABEL = {
     "advanced_auditing": "M365 Advanced Auditing (UAL)",
 }
 
-# Collector names that each feature gates — shown in the pre-run summary
+# Collector names that each feature gates — shown in the pre-run summary.
+# advanced_auditing does NOT block UAL collection; the endpoint is available on
+# any Exchange-licensed tenant. Absence means some event types (MailItemsAccessed,
+# Send) may not appear in results, but the API call itself will succeed.
 _GATES = {
     "p1":               ["signin_logs", "entra_audit_logs", "conditional_access_policies"],
     "p2":               ["risky_users", "risky_signins"],
-    "advanced_auditing": ["unified_audit_log"],
+    "advanced_auditing": [],
+}
+
+# Informational notes shown when a feature is absent but still attempted
+_NOTES = {
+    "advanced_auditing": (
+        "UAL will run — MailItemsAccessed/Send events require Advanced Auditing"
+    ),
 }
 
 
@@ -156,14 +166,15 @@ class TenantLicenseProfile:
     # Display                                                              #
     # ------------------------------------------------------------------ #
 
-    def summary_rows(self) -> list[tuple[str, bool, list[str]]]:
+    def summary_rows(self) -> list[tuple[str, bool, list[str], str]]:
         """
         Return rows for the pre-run license banner.
-        Each row: (label, is_available, [collector_names_that_will_be_skipped]).
+        Each row: (label, is_available, [skipped_collector_names], note).
         """
         rows = []
         for key in ("p1", "p2", "advanced_auditing"):
             available = self.allows(key)
             skipped = _GATES[key] if not available else []
-            rows.append((_LABEL[key], available, skipped))
+            note = _NOTES.get(key, "") if not available else ""
+            rows.append((_LABEL[key], available, skipped, note))
         return rows

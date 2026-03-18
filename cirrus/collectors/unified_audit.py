@@ -58,12 +58,6 @@ class UnifiedAuditCollector(GraphCollector):
 
         Returns list of UAL record dicts.
         """
-        self._require_license(
-            "advanced_auditing",
-            "The Unified Audit Log endpoint requires M365 Advanced Auditing "
-            "(Microsoft 365 E5 or the Purview Audit Premium add-on).",
-        )
-
         end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(days=days)
 

@@ -30,7 +30,7 @@ console = Console()
 def _render_license_banner(profile: TenantLicenseProfile) -> None:
     """Print a compact license tier summary inline with the compliance output."""
     parts: list[str] = []
-    for label, available, skipped in profile.summary_rows():
+    for label, available, skipped, note in profile.summary_rows():
         if available:
             parts.append(f"{label} [green]✓[/green]")
         else:
@@ -38,11 +38,13 @@ def _render_license_banner(profile: TenantLicenseProfile) -> None:
 
     console.print("  [bold]Tenant licenses:[/bold]  " + "   ".join(parts))
 
-    for label, available, skipped in profile.summary_rows():
+    for label, available, skipped, note in profile.summary_rows():
         if not available and skipped:
             console.print(
                 f"  [dim]↳ {label} not licensed — some checks may show expected FAILs[/dim]"
             )
+        elif not available and note:
+            console.print(f"  [dim]↳ {note}[/dim]")
     console.print()
 
 ALL_CHECKS: list[type[BaseCheck]] = (

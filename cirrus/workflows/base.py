@@ -190,7 +190,7 @@ class BaseWorkflow:
 def _render_license_banner(profile: TenantLicenseProfile) -> None:
     """Print a compact license profile banner before collection starts."""
     parts: list[str] = []
-    for label, available, skipped in profile.summary_rows():
+    for label, available, skipped, note in profile.summary_rows():
         if available:
             parts.append(f"{label} [green]✓[/green]")
         else:
@@ -198,12 +198,14 @@ def _render_license_banner(profile: TenantLicenseProfile) -> None:
 
     console.print("\n[bold]Tenant license profile:[/bold]  " + "   ".join(parts))
 
-    for label, available, skipped in profile.summary_rows():
+    for label, available, skipped, note in profile.summary_rows():
         if not available and skipped:
             names = ", ".join(skipped)
             console.print(
                 f"  [dim]↳ {label} not found — {names} will be skipped[/dim]"
             )
+        elif not available and note:
+            console.print(f"  [dim]↳ {note}[/dim]")
 
     console.print()
 
