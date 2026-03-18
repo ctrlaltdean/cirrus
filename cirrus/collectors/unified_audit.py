@@ -99,11 +99,16 @@ class UnifiedAuditCollector(GraphCollector):
             query_body["operationFilters"] = operations
 
         # Submit the async query
+        if self.on_status:
+            self.on_status("submitting query...")
         query_url = f"{GRAPH_BETA}/security/auditLog/queries"
         response = self._post(query_url, query_body)
         query_id = response.get("id")
         if not query_id:
             raise CollectorError("UAL query submission did not return a query ID.")
+
+        if self.on_status:
+            self.on_status("query submitted — waiting for results")
 
         # Poll for completion
         status_url = f"{GRAPH_BETA}/security/auditLog/queries/{query_id}"
@@ -119,6 +124,11 @@ class UnifiedAuditCollector(GraphCollector):
                     f"UAL query {query_id} ended with status '{status}'."
                 )
 
+            if self.on_status:
+                mins, secs = divmod(elapsed, 60)
+                elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                self.on_status(f"query {status or 'running'} — {elapsed_str} elapsed")
+
             time.sleep(POLL_INTERVAL)
             elapsed += POLL_INTERVAL
 
@@ -127,6 +137,9 @@ class UnifiedAuditCollector(GraphCollector):
                 f"UAL query {query_id} timed out after {POLL_TIMEOUT}s. "
                 "Try a shorter date range or fewer users."
             )
+
+        if self.on_status:
+            self.on_status("query complete — fetching records...")
 
         # Retrieve paginated records
         records_url = f"{GRAPH_BETA}/security/auditLog/queries/{query_id}/records"

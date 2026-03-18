@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
@@ -126,16 +126,33 @@ class BaseWorkflow:
 
         with Progress(
             SpinnerColumn(),
-            TextColumn("[bold blue]{task.description:<40}"),
-            BarColumn(bar_width=30),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=20),
             TaskProgressColumn(),
             console=console,
             transient=False,
         ) as progress:
             for collector_cls, collector_kwargs, display_name in steps:
-                task = progress.add_task(display_name, total=None)
+                task = progress.add_task(
+                    f"[bold blue]{display_name}[/bold blue]", total=None
+                )
                 collector: GraphCollector = collector_cls(self.token)
                 collector.license_profile = license_profile
+
+                # Wire live status updates back to the progress bar description
+                def _make_status_cb(
+                    prog: Progress, t: Any, name: str
+                ) -> Callable[[str], None]:
+                    def _cb(msg: str) -> None:
+                        prog.update(
+                            t,
+                            description=(
+                                f"[bold blue]{name}[/bold blue]  [dim]{msg}[/dim]"
+                            ),
+                        )
+                    return _cb
+
+                collector.on_status = _make_status_cb(progress, task, display_name)
 
                 self.case.audit.log_collection_start(
                     collector.name,

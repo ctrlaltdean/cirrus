@@ -12,7 +12,7 @@ All collectors inherit from GraphCollector. It handles:
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 import requests
 
@@ -57,6 +57,11 @@ class GraphCollector:
         #: Pre-fetched license profile. Set by the workflow before collection
         #: starts. If None, _require_license() performs a lazy fetch on first use.
         self.license_profile: TenantLicenseProfile | None = None
+
+        #: Optional status callback. When set by the workflow, the collector
+        #: calls this with short human-readable status strings so the progress
+        #: display can update in real time (e.g. during UAL polling).
+        self.on_status: Callable[[str], None] | None = None
 
     # ------------------------------------------------------------------
     # Low-level HTTP helpers
@@ -163,10 +168,13 @@ class GraphCollector:
         """
         Return all records from a paginated Graph API endpoint.
         Each page may return a 'value' list.
+        Reports running record count via on_status if a callback is set.
         """
         records: list[dict] = []
         for page in self._paginate(url, params):
             records.extend(page.get("value", []))
+            if self.on_status and records:
+                self.on_status(f"retrieving records... ({len(records)} so far)")
         return records
 
     def _require_license(self, feature: str, detail: str) -> None:
