@@ -146,11 +146,13 @@ CaseNameOpt = Annotated[Optional[str], typer.Option("--case-name", "-c", help="C
 DaysOpt = Annotated[Optional[int], typer.Option("--days", "-d", help="Days back to collect (alternative to --start-date / --end-date).")]
 StartDateOpt = Annotated[Optional[str], typer.Option("--start-date", help="Collection start date, YYYY-MM-DD (alternative to --days).")]
 EndDateOpt = Annotated[Optional[str], typer.Option("--end-date", help="Collection end date, YYYY-MM-DD (default: today). Use with --start-date.")]
-UserOpt = Annotated[Optional[str], typer.Option("--user", help="Single target user UPN.")]
-UsersOpt = Annotated[Optional[list[str]], typer.Option("--users", help="Multiple target UPNs (repeat flag for each).")]
-UsersFileOpt = Annotated[Optional[Path], typer.Option("--users-file", help="Text file with one UPN per line.")]
-AllUsersOpt = Annotated[bool, typer.Option("--all-users", help="Target the entire tenant (no user filter).")]
-ClientIdOpt = Annotated[Optional[str], typer.Option("--client-id", help="Override app registration client ID.")]
+UserOpt = Annotated[Optional[str], typer.Option("--user", help="Single target user by UPN/email (e.g. john@contoso.com).")]
+UsersOpt = Annotated[Optional[list[str]], typer.Option("--users", help="Target users by UPN/email — repeat flag for each (e.g. --users john@contoso.com --users jane@contoso.com).")]
+UsersFileOpt = Annotated[Optional[Path], typer.Option("--users-file", help="Text file with one UPN per line. Lines starting with # are ignored.")]
+AllUsersOpt = Annotated[bool, typer.Option("--all-users", help="Collect for all users in the tenant (no user filter). Use with caution on large tenants.")]
+ClientIdOpt = Annotated[Optional[str], typer.Option("--client-id", help="Override the Azure app registration client ID (default: Microsoft Graph Command Line Tools).")]
+# Optional tenant for run commands — prompts interactively if omitted.
+TenantRunOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help="Tenant domain or GUID (e.g. contoso.com or <azure-ad-guid>). Prompted if omitted.")]
 BenchmarkOpt = Annotated[Optional[str], typer.Option("--benchmark", "-b", help="Benchmark: cis-m365, cis-entra, or all. Omit to use the wizard.")]
 LevelOpt = Annotated[Optional[str], typer.Option("--level", "-l", help="CIS levels: 1, 2, or all. Omit to use the wizard.")]
 OptionalTenantOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help="Tenant domain or GUID. Prompted if omitted.")]
@@ -175,6 +177,73 @@ def _banner(skip_update_check: bool = False) -> None:
     )
     if not skip_update_check:
         _silent_update_check()
+
+
+def _validate_upn(upn: str) -> str | None:
+    """Return an error string if the UPN looks wrong, else None."""
+    if " " in upn:
+        return f"'{upn}' contains spaces — UPNs must not have spaces."
+    parts = upn.split("@")
+    if len(parts) != 2:
+        return f"'{upn}' must contain exactly one '@' character."
+    local, domain = parts
+    if not local:
+        return f"'{upn}' has an empty local part before '@'."
+    if "." not in domain:
+        return f"'{upn}' domain part '{domain}' does not contain a '.' — expected e.g. contoso.com."
+    return None
+
+
+def _prompt_tenant() -> str:
+    """Interactively prompt for a tenant domain or GUID."""
+    console.print("[bold]Tenant[/bold]")
+    console.print(
+        "[dim]Enter the Microsoft 365 tenant domain or Azure AD tenant GUID.\n"
+        "Examples:  contoso.com   contoso.onmicrosoft.com   xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx[/dim]"
+    )
+    while True:
+        value = Prompt.ask("Tenant").strip()
+        if value:
+            return value
+        console.print("[red]Tenant is required.[/red]")
+
+
+def _show_run_summary(
+    workflow: str,
+    tenant: str,
+    users: list[str] | None,
+    start_dt: datetime,
+    end_dt: datetime,
+    output_dir: Path,
+    case_name: str | None,
+) -> None:
+    """Print a pre-run confirmation summary panel and prompt to proceed."""
+    span_days = (end_dt - start_dt).days + 1
+    date_range = (
+        f"{start_dt.strftime(_DATE_FMT)} \u2192 {end_dt.strftime(_DATE_FMT)}  ({span_days} days)"
+    )
+    targets = ", ".join(users) if users is not None else "All users in tenant"
+    workflow_label = (
+        "BEC Investigation" if workflow == "bec" else "Full Tenant Collection"
+    )
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Key", style="bold", min_width=14)
+    table.add_column("Value", style="cyan")
+    table.add_row("Workflow", workflow_label)
+    table.add_row("Tenant", tenant)
+    table.add_row("Targets", targets)
+    table.add_row("Date range", date_range)
+    table.add_row("Output dir", str(output_dir))
+    table.add_row("Case name", case_name if case_name else "auto-generated")
+    console.print(
+        Panel(
+            table,
+            title=f"[bold]{workflow_label} \u2014 Collection Summary[/bold]",
+            border_style="bright_blue",
+        )
+    )
+    if not Confirm.ask("[bold]Ready to proceed?[/bold]", default=True):
+        raise typer.Exit(0)
 
 
 def _resolve_users(
@@ -208,27 +277,38 @@ def _resolve_users(
 
     # Interactive prompt — nothing was specified via flags
     console.print("\n[bold]No user target specified.[/bold]")
-    choice = Prompt.ask(
-        "How would you like to target users?",
-        choices=["1", "2", "3", "4"],
-        default="1",
-        show_choices=False,
-    )
     console.print(
-        "  [cyan]1[/cyan] Single user\n"
-        "  [cyan]2[/cyan] Multiple users (comma-separated)\n"
-        "  [cyan]3[/cyan] Load users from a file\n"
-        "  [cyan]4[/cyan] All users in the tenant\n",
-        highlight=False,
+        "[dim]User Principal Name (UPN) — the user's sign-in address, "
+        "e.g. john@contoso.com or john@contoso.onmicrosoft.com[/dim]\n"
     )
+    console.print("[bold]How would you like to target users?[/bold]\n")
+    console.print("  [cyan]1[/cyan]  Single user        [dim]e.g. john@contoso.com[/dim]")
+    console.print("  [cyan]2[/cyan]  Multiple users     [dim]enter as a comma-separated list[/dim]")
+    console.print("  [cyan]3[/cyan]  Load from file     [dim]text file, one UPN per line[/dim]")
+    console.print("  [cyan]4[/cyan]  All users          [dim]no user filter — collects entire tenant[/dim]")
+    console.print()
     choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"])
 
     if choice == "1":
-        upn = Prompt.ask("Enter user UPN")
-        return [upn.strip()]
+        while True:
+            upn = Prompt.ask("Enter user UPN").strip()
+            err = _validate_upn(upn)
+            if err:
+                console.print(f"[red]Invalid UPN:[/red] {err}")
+            else:
+                break
+        return [upn]
     elif choice == "2":
-        raw = Prompt.ask("Enter UPNs (comma-separated)")
-        return [u.strip() for u in raw.split(",") if u.strip()]
+        while True:
+            raw = Prompt.ask("Enter UPNs (comma-separated)").strip()
+            entries = [u.strip() for u in raw.split(",") if u.strip()]
+            errors = [(u, _validate_upn(u)) for u in entries if _validate_upn(u)]
+            if errors:
+                for u, err in errors:
+                    console.print(f"[red]Invalid UPN:[/red] {err}")
+            else:
+                break
+        return entries
     elif choice == "3":
         path_str = Prompt.ask("Path to users file")
         p = Path(path_str)
@@ -236,7 +316,12 @@ def _resolve_users(
             console.print(f"[red]File not found:[/red] {p}")
             raise typer.Exit(1)
         lines = p.read_text().splitlines()
-        return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+        file_entries = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+        for entry in file_entries:
+            err = _validate_upn(entry)
+            if err:
+                console.print(f"[yellow]Warning — invalid UPN in file:[/yellow] {err}")
+        return file_entries
     else:
         return None  # all users
 
@@ -251,7 +336,14 @@ def _authenticate(tenant: str, client_id: str | None = None) -> tuple[str, str]:
         kwargs["client_id"] = client_id
     try:
         console.print(f"\n[bold]Authenticating to:[/bold] [cyan]{tenant}[/cyan]")
-        console.print("[dim]A browser window will open. Sign in with an account that has the required roles.[/dim]\n")
+        console.print(
+            "[dim]A browser window will open. Sign in with a Microsoft 365 account that has "
+            "one of the following roles:\n"
+            "  \u2022 Global Reader  (recommended \u2014 read-only, broad access)\n"
+            "  \u2022 Security Reader + Exchange Administrator  (for mailbox data)\n"
+            "  \u2022 Global Administrator  (if the above roles are insufficient)\n"
+            "Credentials are cached locally \u2014 you will not be prompted again unless the token expires.[/dim]\n"
+        )
         token = get_token(tenant, **kwargs)
         console.print("[green]✓ Authentication successful[/green]\n")
         return token, tenant
@@ -458,7 +550,7 @@ def auth_status() -> None:
 
 @run_app.command("bec")
 def run_bec(
-    tenant: TenantOpt,
+    tenant: TenantRunOpt = None,
     output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
     case_name: CaseNameOpt = None,
     days: DaysOpt = None,
@@ -477,13 +569,28 @@ def run_bec(
     OAuth grants, MFA methods, risky user data, and the Unified Audit Log
     for target user(s).
 
-    Examples:
+    Run without flags to launch the interactive wizard.
+
+    Examples (scripted):
         cirrus run bec --tenant contoso.com --user john@contoso.com --days 30
-        cirrus run bec --tenant contoso.com --user john@contoso.com --start-date 2026-03-01 --end-date 2026-03-15
+        cirrus run bec --tenant contoso.com --users john@contoso.com --users jane@contoso.com --start-date 2026-03-01 --end-date 2026-03-18
+        cirrus run bec --tenant contoso.com --users-file targets.txt --days 14
+        cirrus run bec --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-18
     """
     _banner()
-    console.print(f"[bold magenta]Workflow:[/bold magenta] Business Email Compromise (BEC)")
-    console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]\n")
+    interactive = tenant is None
+    if interactive:
+        console.print(Panel.fit(
+            "[bold]BEC Investigation Wizard[/bold]\n"
+            "[dim]Answer a few questions to configure your collection run.\n"
+            "Press Ctrl+C at any time to cancel.[/dim]",
+            border_style="bright_blue",
+        ))
+        console.print()
+        tenant = _prompt_tenant()
+    else:
+        console.print(f"[bold magenta]Workflow:[/bold magenta] Business Email Compromise (BEC)")
+        console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]\n")
 
     target_users = _resolve_users(user, users, users_file, all_users)
     if target_users:
@@ -493,6 +600,15 @@ def run_bec(
             raise typer.Exit(0)
 
     start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
+
+    if interactive and case_name is None:
+        case_name_input = Prompt.ask(
+            "Case name [dim](optional \u2014 leave blank for auto-generated)[/dim]",
+            default="",
+        ).strip()
+        case_name = case_name_input or None
+
+    _show_run_summary("bec", tenant, target_users, start_dt, end_dt, output_dir, case_name)
 
     token, _ = _authenticate(tenant, client_id)
 
@@ -529,7 +645,7 @@ def run_bec(
 
 @run_app.command("full")
 def run_full(
-    tenant: TenantOpt,
+    tenant: TenantRunOpt = None,
     output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
     case_name: CaseNameOpt = None,
     days: DaysOpt = None,
@@ -547,13 +663,27 @@ def run_full(
     Sweeps the entire tenant for all supported artifact types.
     Use when the compromised account is unknown, or for proactive threat hunting.
 
-    Examples:
+    Run without flags to launch the interactive wizard.
+
+    Examples (scripted):
         cirrus run full --tenant contoso.com --all-users --days 90
-        cirrus run full --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-15
+        cirrus run full --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-18
+        cirrus run full --tenant contoso.com --users-file targets.txt --days 30
     """
     _banner()
-    console.print(f"[bold magenta]Workflow:[/bold magenta] Full Tenant Collection")
-    console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]\n")
+    interactive = tenant is None
+    if interactive:
+        console.print(Panel.fit(
+            "[bold]Full Tenant Collection Wizard[/bold]\n"
+            "[dim]Answer a few questions to configure your collection run.\n"
+            "Press Ctrl+C at any time to cancel.[/dim]",
+            border_style="bright_blue",
+        ))
+        console.print()
+        tenant = _prompt_tenant()
+    else:
+        console.print(f"[bold magenta]Workflow:[/bold magenta] Full Tenant Collection")
+        console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]\n")
 
     console.print(
         "[yellow]⚠  Full collection on large tenants may take a long time "
@@ -568,6 +698,15 @@ def run_full(
             raise typer.Exit(0)
 
     start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
+
+    if interactive and case_name is None:
+        case_name_input = Prompt.ask(
+            "Case name [dim](optional \u2014 leave blank for auto-generated)[/dim]",
+            default="",
+        ).strip()
+        case_name = case_name_input or None
+
+    _show_run_summary("full", tenant, target_users, start_dt, end_dt, output_dir, case_name)
 
     token, _ = _authenticate(tenant, client_id)
 
