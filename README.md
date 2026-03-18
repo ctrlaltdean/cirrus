@@ -486,7 +486,8 @@ investigations/
     ├── service_principals.json / .csv / .ndjson   ← full workflow only
     ├── unified_audit_log.json / .csv / .ndjson    ← UAL NDJSON is SOF-ELK normalized
     ├── ioc_correlation.json                        ← cross-collector correlation findings
-    ├── ioc_correlation.txt                         ← human-readable correlation report
+    ├── ioc_correlation.txt                         ← formatted correlation report
+    ├── investigation_report.html                   ← single-file HTML investigation report
     │
     └── compliance_audit.json / .csv / .txt        ← audit workflow only
 ```

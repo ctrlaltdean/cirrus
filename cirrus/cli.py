@@ -1441,8 +1441,13 @@ def analyze(
             f"[red]{summary.get('high', 0)} HIGH[/red]  "
             f"[yellow]{summary.get('medium', 0)} MEDIUM[/yellow]\n"
             f"[bold]JSON:[/bold]   {case_dir / 'ioc_correlation.json'}\n"
-            f"[bold]Report:[/bold] {case_dir / 'ioc_correlation.txt'}\n"
+            f"[bold]Text:[/bold]   {case_dir / 'ioc_correlation.txt'}\n"
         )
+
+    # Always generate HTML report
+    from cirrus.analysis.report import generate_report
+    report_path = generate_report(case_dir)
+    console.print(f"[bold]Report:[/bold] [cyan]{report_path}[/cyan]\n")
 
         # Print details for each finding
         for f in findings:

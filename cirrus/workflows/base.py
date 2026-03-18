@@ -288,6 +288,15 @@ def _run_correlation(case_dir: Path, result: "WorkflowResult", case: "Case") -> 
             )
         else:
             console.print("\n[bold]Correlation:[/bold] [green]No cross-collector findings.[/green]")
+
+        # HTML report
+        try:
+            from cirrus.analysis.report import generate_report
+            report_path = generate_report(case_dir)
+            console.print(f"[bold]Report:[/bold]      [cyan]{report_path}[/cyan]")
+        except Exception as exc:
+            console.print(f"\n[dim]HTML report skipped: {exc}[/dim]")
+
     except Exception as exc:
         console.print(f"\n[dim]Correlation skipped: {exc}[/dim]")
 
