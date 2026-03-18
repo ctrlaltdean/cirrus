@@ -105,25 +105,36 @@ def save_collection(
     case_dir: Path,
     base_name: str,
     ndjson_records: list[dict] | None = None,
+    prewritten_ndjson: Path | None = None,
 ) -> tuple[Path, Path, Path, str, str, str]:
     """
     Save a collection to JSON, CSV, and NDJSON.
 
     Args:
-        records:       Raw records written to .json and .csv.
-        case_dir:      Case output directory.
-        base_name:     File stem (e.g. "unified_audit_log").
-        ndjson_records: SOF-ELK normalized records for .ndjson output.
-                        If None, the raw records are used as-is.
+        records:          Raw records written to .json and .csv.
+        case_dir:         Case output directory.
+        base_name:        File stem (e.g. "unified_audit_log").
+        ndjson_records:   SOF-ELK normalized records for .ndjson output.
+                          If None, the raw records are used as-is.
+                          Ignored when prewritten_ndjson is provided.
+        prewritten_ndjson: Path to an already-written .ndjson file (e.g.
+                          streamed live during collection). When provided,
+                          the file is not rewritten — only its hash is computed.
 
     Returns (json_path, csv_path, ndjson_path, json_sha256, csv_sha256, ndjson_sha256).
     """
     json_path = case_dir / f"{base_name}.json"
     csv_path = case_dir / f"{base_name}.csv"
-    ndjson_path = case_dir / f"{base_name}.ndjson"
     json_hash = write_json(records, json_path)
     csv_hash = write_csv(records, csv_path)
-    ndjson_hash = write_ndjson(
-        ndjson_records if ndjson_records is not None else records, ndjson_path
-    )
+
+    if prewritten_ndjson is not None:
+        ndjson_path = prewritten_ndjson
+        ndjson_hash = file_sha256(ndjson_path)
+    else:
+        ndjson_path = case_dir / f"{base_name}.ndjson"
+        ndjson_hash = write_ndjson(
+            ndjson_records if ndjson_records is not None else records, ndjson_path
+        )
+
     return json_path, csv_path, ndjson_path, json_hash, csv_hash, ndjson_hash

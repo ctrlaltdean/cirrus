@@ -7,6 +7,7 @@ and render progress to the terminal via Rich.
 
 from __future__ import annotations
 
+import json as _json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from rich.table import Table
 from cirrus.collectors.base import CollectorError, GraphCollector
 from cirrus.output.case import Case
 from cirrus.output.writer import save_collection
+from cirrus.utils.helpers import file_sha256
 from cirrus.utils.license import TenantLicenseProfile
 
 console = Console()
@@ -132,82 +134,104 @@ class BaseWorkflow:
             console=console,
             transient=False,
         ) as progress:
+            # Factory kept outside the loop so it doesn't capture loop variables.
+            def _make_status_cb(
+                prog: Progress, t: Any, name: str
+            ) -> Callable[[str], None]:
+                def _cb(msg: str) -> None:
+                    prog.update(
+                        t,
+                        description=f"[bold blue]{name}[/bold blue]  [dim]{msg}[/dim]",
+                    )
+                return _cb
+
+            def _make_page_cb(
+                f: Any, col: GraphCollector
+            ) -> Callable[[list[dict]], None]:
+                """Write each page of raw records to the open NDJSON file handle."""
+                def _cb(page_records: list[dict]) -> None:
+                    for record in col.sofelk_transform(page_records):
+                        f.write(
+                            _json.dumps(record, ensure_ascii=False, default=str) + "\n"
+                        )
+                    f.flush()
+                return _cb
+
             for collector_cls, collector_kwargs, display_name in steps:
                 task = progress.add_task(
                     f"[bold blue]{display_name}[/bold blue]", total=None
                 )
                 collector: GraphCollector = collector_cls(self.token)
                 collector.license_profile = license_profile
-
-                # Wire live status updates back to the progress bar description
-                def _make_status_cb(
-                    prog: Progress, t: Any, name: str
-                ) -> Callable[[str], None]:
-                    def _cb(msg: str) -> None:
-                        prog.update(
-                            t,
-                            description=(
-                                f"[bold blue]{name}[/bold blue]  [dim]{msg}[/dim]"
-                            ),
-                        )
-                    return _cb
-
                 collector.on_status = _make_status_cb(progress, task, display_name)
+
+                # Open the NDJSON file before collection starts so records are
+                # streamed to disk page-by-page as they arrive.
+                ndjson_path = self.case.case_dir / f"{collector.name}.ndjson"
+                ndjson_path.parent.mkdir(parents=True, exist_ok=True)
 
                 self.case.audit.log_collection_start(
                     collector.name,
                     {k: str(v) for k, v in collector_kwargs.items()},
                 )
 
-                try:
-                    records = collector.collect(**collector_kwargs)
-                    ndjson_records = collector.sofelk_transform(records)
-                    json_path, csv_path, ndjson_path, json_hash, csv_hash, ndjson_hash = (
-                        save_collection(
-                            records, self.case.case_dir, collector.name,
-                            ndjson_records=ndjson_records,
+                with open(ndjson_path, "w", encoding="utf-8") as _ndjson_fh:
+                    collector.on_page = _make_page_cb(_ndjson_fh, collector)
+
+                    try:
+                        records = collector.collect(**collector_kwargs)
+                    except CollectorError as e:
+                        # File is closed by the 'with' block on continue.
+                        self.case.audit.log_collection_error(collector.name, str(e))
+                        cr = CollectionResult(
+                            collector_name=collector.name,
+                            record_count=0,
+                            json_path=Path(),
+                            csv_path=Path(),
+                            ndjson_path=ndjson_path,
+                            json_hash="",
+                            csv_hash="",
+                            ndjson_hash="",
+                            error=str(e),
                         )
-                    )
-                    ioc_count = sum(
-                        len(r.get("_iocFlags", [])) for r in records
-                    )
+                        result.results.append(cr)
+                        progress.update(
+                            task, completed=0, total=1,
+                            description=f"[red]{display_name} (FAILED)",
+                        )
+                        continue
 
-                    self.case.audit.log_collection_complete(
-                        collector.name,
-                        len(records),
-                        json_path,
-                        json_hash,
-                    )
+                # NDJSON file is now closed and complete — hash it.
+                ndjson_hash = file_sha256(ndjson_path)
 
-                    cr = CollectionResult(
-                        collector_name=collector.name,
-                        record_count=len(records),
-                        json_path=json_path,
-                        csv_path=csv_path,
-                        ndjson_path=ndjson_path,
-                        json_hash=json_hash,
-                        csv_hash=csv_hash,
-                        ndjson_hash=ndjson_hash,
-                        ioc_count=ioc_count,
-                    )
-                    result.results.append(cr)
-                    progress.update(task, completed=len(records), total=len(records))
+                json_path, csv_path, _, json_hash, csv_hash, _ = save_collection(
+                    records, self.case.case_dir, collector.name,
+                    prewritten_ndjson=ndjson_path,
+                )
+                ioc_count = sum(
+                    len(r.get("_iocFlags", [])) for r in records
+                )
 
-                except CollectorError as e:
-                    self.case.audit.log_collection_error(collector.name, str(e))
-                    cr = CollectionResult(
-                        collector_name=collector.name,
-                        record_count=0,
-                        json_path=Path(),
-                        csv_path=Path(),
-                        ndjson_path=Path(),
-                        json_hash="",
-                        csv_hash="",
-                        ndjson_hash="",
-                        error=str(e),
-                    )
-                    result.results.append(cr)
-                    progress.update(task, completed=0, total=1, description=f"[red]{display_name} (FAILED)")
+                self.case.audit.log_collection_complete(
+                    collector.name,
+                    len(records),
+                    json_path,
+                    json_hash,
+                )
+
+                cr = CollectionResult(
+                    collector_name=collector.name,
+                    record_count=len(records),
+                    json_path=json_path,
+                    csv_path=csv_path,
+                    ndjson_path=ndjson_path,
+                    json_hash=json_hash,
+                    csv_hash=csv_hash,
+                    ndjson_hash=ndjson_hash,
+                    ioc_count=ioc_count,
+                )
+                result.results.append(cr)
+                progress.update(task, completed=len(records), total=len(records))
 
         self.case.audit.log_workflow_complete(self.name, result.total_records)
         return result

@@ -63,6 +63,11 @@ class GraphCollector:
         #: display can update in real time (e.g. during UAL polling).
         self.on_status: Callable[[str], None] | None = None
 
+        #: Optional page callback. When set by the workflow, _collect_all
+        #: calls this with each raw page of records as they arrive so the
+        #: workflow can stream them to disk without waiting for full collection.
+        self.on_page: Callable[[list[dict]], None] | None = None
+
     # ------------------------------------------------------------------
     # Low-level HTTP helpers
     # ------------------------------------------------------------------
@@ -168,11 +173,17 @@ class GraphCollector:
         """
         Return all records from a paginated Graph API endpoint.
         Each page may return a 'value' list.
-        Reports running record count via on_status if a callback is set.
+
+        Fires callbacks for each page if set:
+          on_page(page_records)  — raw records, for streaming to disk
+          on_status(msg)         — human-readable running count for the UI
         """
         records: list[dict] = []
         for page in self._paginate(url, params):
-            records.extend(page.get("value", []))
+            page_records = page.get("value", [])
+            records.extend(page_records)
+            if self.on_page and page_records:
+                self.on_page(page_records)
             if self.on_status and records:
                 self.on_status(f"retrieving records... ({len(records)} so far)")
         return records
