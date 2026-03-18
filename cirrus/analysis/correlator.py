@@ -263,6 +263,9 @@ class CorrelationEngine:
             encoding="utf-8",
         )
 
+        txt_path = self.case_dir / "ioc_correlation.txt"
+        _write_text_report(report, findings, txt_path)
+
         return report
 
     # ── Data loading ───────────────────────────────────────────────────────────
@@ -865,6 +868,97 @@ class CorrelationEngine:
             ))
 
         return findings
+
+
+# ── Report writer ─────────────────────────────────────────────────────────────
+
+_SEV_LABEL = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
+_W = 80  # report width
+
+
+def _write_text_report(report: dict[str, Any], findings: list[Finding], path: Path) -> None:
+    """Write a human-readable ioc_correlation.txt report to path."""
+    summary = report["summary"]
+    collectors = ", ".join(report.get("collectors_loaded") or [])
+    generated = report.get("generated_at", "")
+    case_dir = report.get("case_dir", "")
+
+    lines: list[str] = [
+        "=" * _W,
+        "CIRRUS — Cross-Collector IOC Correlation Report",
+        f"Case:       {case_dir}",
+        f"Generated:  {generated}",
+        f"Collectors: {collectors}",
+        f"Findings:   {summary['total_findings']} total  "
+        f"({summary.get('high', 0)} HIGH   "
+        f"{summary.get('medium', 0)} MEDIUM   "
+        f"{summary.get('low', 0)} LOW)",
+    ]
+    if summary.get("affected_users"):
+        lines.append(f"Users:      {', '.join(summary['affected_users'])}")
+    lines += ["=" * _W, ""]
+
+    if not findings:
+        lines += ["No cross-collector findings.", ""]
+    else:
+        for f in findings:
+            sev = _SEV_LABEL.get(f.severity, f.severity.upper())
+            lines += [
+                "─" * _W,
+                f"{f.id}  [{sev}]  {f.title}",
+                f"Rule:  {f.rule}",
+            ]
+            if f.user:
+                lines.append(f"User:  {f.user}")
+            lines += ["─" * _W, ""]
+
+            # Description — wrap at 76 chars
+            for para in f.description.split(". "):
+                para = para.strip()
+                if para:
+                    lines += _wrap(para + ("." if not para.endswith(".") else ""), 76, "  ") + [""]
+
+            # Evidence table
+            if f.evidence:
+                lines.append("  Evidence:")
+                lines.append(f"  {'Collector':<22} {'Timestamp':<22} Summary")
+                lines.append(f"  {'-'*22} {'-'*22} {'-'*28}")
+                for ev in f.evidence:
+                    ts = (ev.timestamp or "")[:19]
+                    collector = ev.collector[:22]
+                    summary_text = ev.summary[:60]
+                    lines.append(f"  {collector:<22} {ts:<22} {summary_text}")
+                lines.append("")
+
+            # IOC flags
+            if f.ioc_flags:
+                flag_str = "  |  ".join(f.ioc_flags[:6])
+                if len(f.ioc_flags) > 6:
+                    flag_str += f"  ... (+{len(f.ioc_flags) - 6} more)"
+                lines += _wrap(f"Flags: {flag_str}", 76, "  ") + [""]
+
+            # Recommendation
+            lines.append("  Recommendation:")
+            lines += _wrap(f.recommendation, 76, "    ") + ["", ""]
+
+    lines += ["=" * _W, "END OF REPORT", "=" * _W, ""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _wrap(text: str, width: int, indent: str) -> list[str]:
+    """Word-wrap text to width, prepending indent to each line."""
+    words = text.split()
+    out: list[str] = []
+    current = indent
+    for word in words:
+        if len(current) + len(word) + 1 > width and current.strip():
+            out.append(current.rstrip())
+            current = indent + word + " "
+        else:
+            current += word + " "
+    if current.strip():
+        out.append(current.rstrip())
+    return out if out else [indent]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

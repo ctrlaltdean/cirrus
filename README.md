@@ -485,6 +485,8 @@ investigations/
     ├── conditional_access_policies.json / .csv / .ndjson
     ├── service_principals.json / .csv / .ndjson   ← full workflow only
     ├── unified_audit_log.json / .csv / .ndjson    ← UAL NDJSON is SOF-ELK normalized
+    ├── ioc_correlation.json                        ← cross-collector correlation findings
+    ├── ioc_correlation.txt                         ← human-readable correlation report
     │
     └── compliance_audit.json / .csv / .txt        ← audit workflow only
 ```
@@ -698,7 +700,7 @@ Total: 3 finding(s)  3 HIGH  0 MEDIUM
 Output: investigations/CONTOSO_20260317_143022/ioc_correlation.json
 ```
 
-Each finding includes the supporting evidence records from both collectors, the specific flags that triggered it, and a recommended response action.
+Each finding includes the supporting evidence records from both collectors, the specific flags that triggered it, and a recommended response action. Two output files are written to the case folder: `ioc_correlation.json` (machine-readable, suitable for SIEM ingestion) and `ioc_correlation.txt` (formatted report for analyst review and case documentation).
 
 ---
 

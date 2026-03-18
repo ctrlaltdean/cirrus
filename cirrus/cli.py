@@ -1440,7 +1440,8 @@ def analyze(
             f"\n[bold]Total:[/bold] {summary['total_findings']} finding(s)  "
             f"[red]{summary.get('high', 0)} HIGH[/red]  "
             f"[yellow]{summary.get('medium', 0)} MEDIUM[/yellow]\n"
-            f"[bold]Output:[/bold] {case_dir / 'ioc_correlation.json'}\n"
+            f"[bold]JSON:[/bold]   {case_dir / 'ioc_correlation.json'}\n"
+            f"[bold]Report:[/bold] {case_dir / 'ioc_correlation.txt'}\n"
         )
 
         # Print details for each finding

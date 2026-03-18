@@ -284,7 +284,7 @@ def _run_correlation(case_dir: Path, result: "WorkflowResult", case: "Case") -> 
             label = f"[red]{finding_count}[/red]" if high_count > 0 else f"[yellow]{finding_count}[/yellow]"
             console.print(
                 f"\n[bold]Correlation:[/bold] {label} cross-collector finding(s) — "
-                f"see [cyan]ioc_correlation.json[/cyan]"
+                f"see [cyan]ioc_correlation.json[/cyan] / [cyan]ioc_correlation.txt[/cyan]"
             )
         else:
             console.print("\n[bold]Correlation:[/bold] [green]No cross-collector findings.[/green]")
