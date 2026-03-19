@@ -284,22 +284,22 @@ def _resolve_users(
         return result
 
     # Interactive prompt — nothing was specified via flags
-    console.print("\n[bold]No user target specified.[/bold]")
+    console.print("\n[bold]No target user specified.[/bold]")
     console.print(
-        "[dim]User Principal Name (UPN) — the user's sign-in address, "
-        "e.g. john@contoso.com or john@contoso.onmicrosoft.com[/dim]\n"
+        "[dim]A User Principal Name (UPN) is the account's sign-in email address.\n"
+        "  Example:  john@contoso.com   or   john@contoso.onmicrosoft.com[/dim]\n"
     )
     console.print("[bold]How would you like to target users?[/bold]\n")
     console.print("  [cyan]1[/cyan]  Single user        [dim]e.g. john@contoso.com[/dim]")
-    console.print("  [cyan]2[/cyan]  Multiple users     [dim]enter as a comma-separated list[/dim]")
-    console.print("  [cyan]3[/cyan]  Load from file     [dim]text file, one UPN per line[/dim]")
-    console.print("  [cyan]4[/cyan]  All users          [dim]no user filter — collects entire tenant[/dim]")
+    console.print("  [cyan]2[/cyan]  Multiple users     [dim]comma-separated, e.g. john@contoso.com, jane@contoso.com[/dim]")
+    console.print("  [cyan]3[/cyan]  Load from file     [dim]plain text file with one UPN per line[/dim]")
+    console.print("  [cyan]4[/cyan]  All users          [dim]no user filter — collects entire tenant (slow on large tenants)[/dim]")
     console.print()
     choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"])
 
     if choice == "1":
         while True:
-            upn = Prompt.ask("Enter user UPN").strip()
+            upn = Prompt.ask("Enter user UPN [dim](e.g. john@contoso.com)[/dim]").strip()
             err = _validate_upn(upn)
             if err:
                 console.print(f"[red]Invalid UPN:[/red] {err}")
@@ -308,8 +308,13 @@ def _resolve_users(
         return [upn]
     elif choice == "2":
         while True:
-            raw = Prompt.ask("Enter UPNs (comma-separated)").strip()
+            raw = Prompt.ask(
+                "Enter UPNs [dim](comma-separated, e.g. john@contoso.com, jane@contoso.com)[/dim]"
+            ).strip()
             entries = [u.strip() for u in raw.split(",") if u.strip()]
+            if not entries:
+                console.print("[red]At least one UPN is required.[/red]")
+                continue
             errors = [(u, _validate_upn(u)) for u in entries if _validate_upn(u)]
             if errors:
                 for u, err in errors:
@@ -318,17 +323,27 @@ def _resolve_users(
                 break
         return entries
     elif choice == "3":
-        path_str = Prompt.ask("Path to users file")
-        p = Path(path_str)
-        if not p.exists():
-            console.print(f"[red]File not found:[/red] {p}")
-            raise typer.Exit(1)
+        while True:
+            path_str = Prompt.ask(
+                "Path to users file [dim](full path, e.g. C:\\suspects.txt or ./targets.txt)[/dim]"
+            ).strip()
+            p = Path(path_str)
+            if not p.exists():
+                console.print(f"[red]File not found:[/red] {p}  — check the path and try again.")
+                continue
+            break
         lines = p.read_text().splitlines()
         file_entries = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
-        for entry in file_entries:
-            err = _validate_upn(entry)
-            if err:
-                console.print(f"[yellow]Warning — invalid UPN in file:[/yellow] {err}")
+        if not file_entries:
+            console.print(f"[red]No UPNs found in[/red] {p}. File must contain one UPN per line.")
+            raise typer.Exit(1)
+        bad = [(e, _validate_upn(e)) for e in file_entries if _validate_upn(e)]
+        for entry, err in bad:
+            console.print(f"[yellow]Warning — skipping invalid UPN in file:[/yellow] {err}")
+        file_entries = [e for e in file_entries if not _validate_upn(e)]
+        if not file_entries:
+            console.print("[red]No valid UPNs remain after validation. Aborting.[/red]")
+            raise typer.Exit(1)
         return file_entries
     else:
         return None  # all users
@@ -477,7 +492,7 @@ def _resolve_date_range(
 
     while True:
         end_str = Prompt.ask(
-            f"  End date   [bold](YYYY-MM-DD)[/bold]",
+            f"  End date   [bold](YYYY-MM-DD)[/bold] [dim]press Enter for today ({today_str})[/dim]",
             default=today_str,
         ).strip()
         try:
@@ -604,14 +619,14 @@ def run_bec(
     if target_users:
         console.print(f"[bold]Targets:[/bold] {', '.join(target_users)}\n")
     else:
-        if not Confirm.ask("[yellow]No user filter — this will collect data for ALL users. Continue?[/yellow]"):
+        if not Confirm.ask("[yellow]⚠  No user filter — this will collect data for EVERY account in the tenant.\n   This can take a long time and produce large output files. Continue?[/yellow]"):
             raise typer.Exit(0)
 
     start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
 
     if interactive and case_name is None:
         case_name_input = Prompt.ask(
-            "Case name [dim](optional \u2014 leave blank for auto-generated)[/dim]",
+            "Case name [dim](optional — e.g. INC-2026-001, leave blank to auto-generate)[/dim]",
             default="",
         ).strip()
         case_name = case_name_input or None
@@ -705,14 +720,14 @@ def run_ato(
     if target_users:
         console.print(f"[bold]Targets:[/bold] {', '.join(target_users)}\n")
     else:
-        if not Confirm.ask("[yellow]No user filter — this will collect data for ALL users. Continue?[/yellow]"):
+        if not Confirm.ask("[yellow]⚠  No user filter — this will collect data for EVERY account in the tenant.\n   This can take a long time and produce large output files. Continue?[/yellow]"):
             raise typer.Exit(0)
 
     start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
 
     if interactive and case_name is None:
         case_name_input = Prompt.ask(
-            "Case name [dim](optional \u2014 leave blank for auto-generated)[/dim]",
+            "Case name [dim](optional — e.g. INC-2026-001, leave blank to auto-generate)[/dim]",
             default="",
         ).strip()
         case_name = case_name_input or None
@@ -804,14 +819,14 @@ def run_bec_ato(
     if target_users:
         console.print(f"[bold]Targets:[/bold] {', '.join(target_users)}\n")
     else:
-        if not Confirm.ask("[yellow]No user filter — this will collect data for ALL users. Continue?[/yellow]"):
+        if not Confirm.ask("[yellow]⚠  No user filter — this will collect data for EVERY account in the tenant.\n   This can take a long time and produce large output files. Continue?[/yellow]"):
             raise typer.Exit(0)
 
     start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
 
     if interactive and case_name is None:
         case_name_input = Prompt.ask(
-            "Case name [dim](optional \u2014 leave blank for auto-generated)[/dim]",
+            "Case name [dim](optional — e.g. INC-2026-001, leave blank to auto-generate)[/dim]",
             default="",
         ).strip()
         case_name = case_name_input or None
@@ -902,14 +917,14 @@ def run_full(
     if target_users:
         console.print(f"[bold]Targets:[/bold] {', '.join(target_users)}\n")
     else:
-        if not Confirm.ask("Collect for ALL users in the tenant. Continue?"):
+        if not Confirm.ask("[yellow]⚠  No user filter — this will collect data for EVERY account in the tenant.\n   This can take a long time and produce large output files. Continue?[/yellow]"):
             raise typer.Exit(0)
 
     start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
 
     if interactive and case_name is None:
         case_name_input = Prompt.ask(
-            "Case name [dim](optional \u2014 leave blank for auto-generated)[/dim]",
+            "Case name [dim](optional — e.g. INC-2026-001, leave blank to auto-generate)[/dim]",
             default="",
         ).strip()
         case_name = case_name_input or None
@@ -1053,7 +1068,7 @@ def _audit_wizard(
 
         if not no_save and not case_name:
             custom_name = Prompt.ask(
-                "Case name [dim](leave blank for auto-generated)[/dim]",
+                "Case name [dim](optional — e.g. INC-2026-001, leave blank to auto-generate)[/dim]",
                 default="",
             ).strip()
             case_name = custom_name or None
@@ -1431,17 +1446,18 @@ def triage(
     # ── Resolve user list ──────────────────────────────────────────────────
     target_users: list[str] = []
     if user:
-        v = _validate_upn(user)
-        if v:
-            target_users.append(v)
-        else:
-            console.print(f"[red]Invalid UPN:[/red] {user}")
+        err = _validate_upn(user)
+        if err:
+            console.print(f"[red]Invalid UPN:[/red] {err}")
             raise typer.Exit(1)
+        target_users.append(user)
     if users:
         for u in users:
-            v = _validate_upn(u)
-            if v:
-                target_users.append(v)
+            err = _validate_upn(u)
+            if err:
+                console.print(f"[red]Invalid UPN:[/red] {err}")
+                raise typer.Exit(1)
+            target_users.append(u)
     if users_file:
         if not users_file.exists():
             console.print(f"[red]File not found:[/red] {users_file}")
@@ -1449,19 +1465,23 @@ def triage(
         for line in users_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
-                v = _validate_upn(line)
-                if v:
-                    target_users.append(v)
+                err = _validate_upn(line)
+                if err:
+                    console.print(f"[yellow]Warning — skipping invalid UPN in file:[/yellow] {err}")
+                    continue
+                target_users.append(line)
 
     if not target_users:
-        target_users = [Prompt.ask(
-            "\n[bold]Target user[/bold] [dim](UPN — e.g. john@contoso.com)[/dim]"
-        ).strip()]
-        v = _validate_upn(target_users[0])
-        if not v:
-            console.print("[red]Invalid UPN format.[/red]")
-            raise typer.Exit(1)
-        target_users = [v]
+        while True:
+            upn = Prompt.ask(
+                "\n[bold]Target user[/bold] [dim](the account's sign-in email, e.g. john@contoso.com)[/dim]"
+            ).strip()
+            err = _validate_upn(upn)
+            if err:
+                console.print(f"[red]Invalid UPN:[/red] {err}")
+            else:
+                target_users = [upn]
+                break
 
     target_users = list(dict.fromkeys(target_users))  # deduplicate, preserve order
 
