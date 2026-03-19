@@ -16,7 +16,15 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 - [Installation](#installation)
   - [Pre-built Executable (Recommended)](#pre-built-executable-recommended)
   - [From Source](#from-source)
+- [Authentication & Consent](#authentication--consent)
+  - [What appears during login](#what-appears-during-login)
+  - [Permissions requested and why](#permissions-requested-and-why)
+  - [Admin consent](#admin-consent)
+  - [Token cache and security](#token-cache-and-security)
+  - [Using a custom app registration](#using-a-custom-app-registration)
 - [Required Roles](#required-roles)
+  - [Minimum roles by workflow](#minimum-roles-by-workflow)
+  - [Provisioning a dedicated investigation account](#provisioning-a-dedicated-investigation-account)
 - [Commands](#commands)
   - [Authentication](#authentication)
   - [Quick Triage](#quick-triage)
@@ -139,18 +147,138 @@ cirrus --help
 
 ---
 
+## Authentication & Consent
+
+### What appears during login
+
+When you run any CIRRUS command that accesses a tenant for the first time, a browser window opens to the Microsoft login page. After signing in, you may see a consent screen that says:
+
+> **Microsoft Graph Command Line Tools** — *Microsoft Corporation (Verified publisher)*
+> *This app would like to:* [list of permissions]
+
+This is expected. CIRRUS authenticates using Microsoft's own pre-registered public client application ("Microsoft Graph Command Line Tools," app ID `14d82eec-204b-4c2f-b7e8-296a70dab67e`). It is a Microsoft-owned, verified-publisher app — not a third-party application. Microsoft built it specifically for CLI tools and scripts that need to call the Graph API.
+
+**CIRRUS requests only read-only delegated permissions.** Delegated means the token is tied to the signed-in account — CIRRUS can only access data the analyst themselves is authorized to see. It cannot read anything beyond what the signed-in account's roles permit.
+
+### Permissions requested and why
+
+| Scope | Used for |
+|---|---|
+| `AuditLog.Read.All` | Sign-in logs, Entra directory audit events |
+| `Directory.Read.All` | Users, groups, devices, app registrations, Conditional Access policies |
+| `Policy.Read.All` | Authorization policies, authentication strength policies |
+| `MailboxSettings.Read` | Mailbox forwarding configuration (SMTP forwarding) |
+| `User.Read.All` | User profiles, assigned licenses, identity federation |
+| `IdentityRiskyUser.Read.All` | Entra Identity Protection — user risk state and history |
+| `IdentityRiskEvent.Read.All` | Entra Identity Protection — individual risk detections |
+| `UserAuthenticationMethod.Read.All` | Registered MFA methods (authenticator apps, FIDO2 keys, phone numbers, etc.) |
+| `AuditLogsQuery.Read.All` | Unified Audit Log (Exchange, SharePoint, Teams activity) |
+| `SecurityEvents.Read.All` | Microsoft Defender security alerts |
+| `Reports.Read.All` | M365 usage and activity reports (compliance audit) |
+| `RoleManagement.Read.Directory` | Directory role assignments — who holds which admin roles |
+
+### Admin consent
+
+Many hardened enterprise tenants disable user-level consent and require an administrator to pre-approve any application. If the analyst account cannot consent on its own, a **Global Administrator** in the customer tenant must grant admin consent for the application before CIRRUS can authenticate.
+
+To grant admin consent, the Global Admin opens:
+```
+https://login.microsoftonline.com/<tenant-id>/adminconsent?client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e
+```
+
+After approval, all users in the tenant can use the application without individual consent prompts.
+
+### Token cache and security
+
+CIRRUS caches tokens in `~/.cirrus/token_cache.json`. This file contains refresh tokens — treat it as sensitive. On shared analyst workstations, run `cirrus auth logout` at the end of each session. The cache is per-tenant; credentials for one tenant are never used to access another.
+
+### Using a custom app registration
+
+Organizations that want CIRRUS to appear under their own display name in customer tenants can register their own Azure app and pass its client ID at runtime:
+
+```bash
+cirrus run bec --tenant contoso.com --client-id <your-app-id>
+```
+
+The `--client-id` flag is supported on every command that authenticates. See the Microsoft documentation on registering a multi-tenant public client application for setup steps.
+
+---
+
 ## Required Roles
 
-CIRRUS uses delegated (interactive login) permissions. The account used to authenticate must hold at least one of these Entra ID roles:
+CIRRUS uses **delegated permissions** — the signed-in account must hold the roles that authorize access to the data being collected. This section covers what roles are needed and how to configure a dedicated investigation account when one needs to be provisioned ad hoc.
 
-| Role | What It Covers |
-|------|----------------|
-| **Global Reader** | All data sources — simplest option for investigations |
-| Security Reader | Sign-in logs, audit logs, Identity Protection, CA policies |
-| Exchange Administrator | Mailbox rules, forwarding settings |
-| Cloud App Security Administrator | OAuth app grants |
+### Minimum roles by workflow
 
-> **MSSP Recommendation:** Create a dedicated read-only investigation account per client tenant with Global Reader. Do not use a Global Administrator account for routine collection.
+| Workflow | Minimum roles required |
+|---|---|
+| `cirrus triage` | Global Reader + Security Reader |
+| `cirrus run bec` | Global Reader + Security Reader |
+| `cirrus run ato` | Global Reader + Security Reader |
+| `cirrus run bec-ato` | Global Reader + Security Reader |
+| `cirrus run full` | Global Reader + Security Reader |
+| `cirrus run audit` | Global Reader + Security Reader (+ Exchange Administrator for PowerShell checks) |
+
+### What each role covers
+
+**Global Reader** *(mandatory for all workflows)*
+Provides read access to nearly all Microsoft 365 and Entra ID data via Graph API: users, groups, devices, audit logs, sign-in logs, app registrations, Conditional Access policies, role assignments, mailbox settings, reports, and the Unified Audit Log. This single role satisfies the majority of what CIRRUS collects.
+
+**Security Reader** *(mandatory for all workflows)*
+Required for Identity Protection data (risky user state, risk detections) and Microsoft Defender security events. Without this role, triage and workflow runs will skip Identity Protection checks but otherwise function normally.
+
+**Important limitation — MFA methods for admin accounts:**
+`UserAuthenticationMethod.Read.All` with delegated permissions has a Microsoft-enforced restriction: accounts holding admin roles (Global Admin, Exchange Admin, etc.) have their MFA methods protected. Global Reader can read MFA methods for non-admin users but **cannot** read MFA methods for accounts that hold any administrator role. To read MFA methods for admin accounts, the investigation account itself must hold **Privileged Authentication Administrator**. This is a higher-privilege role — evaluate whether it is appropriate for the engagement before requesting it.
+
+**Exchange Administrator** *(compliance audit only)*
+Required only for `cirrus run audit` when Exchange Online PowerShell checks are enabled. The PowerShell module (`ExchangeOnlineManagement`) connects separately from Graph API and uses its own authentication. Global Reader alone is sufficient for all Exchange data collected via Graph.
+
+### Provisioning a dedicated investigation account
+
+When a customer needs to create an account specifically for a CIRRUS engagement, provide them with these instructions:
+
+**Account requirements:**
+- Account type: Member (not Guest) in the customer's Entra ID tenant
+- License: Any M365 license that enables the account to sign in (Microsoft 365 F1 or above is sufficient — a full E3/E5 license is not required for the investigation account itself, though the **tenant** must have appropriate licenses for the data to exist)
+- MFA: Required — the account must have MFA configured before CIRRUS can use it
+
+**Role assignments** (minimum for investigation workflows):
+```
+Global Reader
+Security Reader
+```
+
+**Role assignments** (if compliance audit is in scope):
+```
+Global Reader
+Security Reader
+Exchange Administrator
+```
+
+**Role assignments** (if MFA methods of admin accounts must be collected):
+```
+Global Reader
+Security Reader
+Privileged Authentication Administrator
+```
+
+> **Note:** Privileged Authentication Administrator is a sensitive role that can modify authentication methods for other users, including Global Administrators. If requesting this role, document the business justification clearly and ensure it is revoked at engagement close.
+
+**How to assign roles in the Entra admin center:**
+
+1. Sign in to [https://entra.microsoft.com](https://entra.microsoft.com)
+2. Navigate to: **Identity → Users → [select the account]**
+3. Select **Assigned roles → Add assignments**
+4. Search for and assign each role listed above
+
+**Account offboarding after the engagement:**
+
+At engagement close, the investigation account should be disabled or deleted, and the CIRRUS application entry removed from Enterprise Applications. CIRRUS provides a cleanup command to assist:
+
+```bash
+# Clears local credentials and provides exact admin instructions for tenant cleanup
+cirrus auth cleanup --tenant contoso.com
+```
 
 ---
 
@@ -171,6 +299,9 @@ cirrus auth status
 
 # Remove cached credentials for a tenant
 cirrus auth logout --tenant contoso.com
+
+# Clear credentials and print tenant-side cleanup instructions for an admin
+cirrus auth cleanup --tenant contoso.com
 ```
 
 ---
