@@ -504,22 +504,35 @@ cirrus run full --tenant contoso.com --users-file vip_users.txt
 | UAL | | ✓ | ✓ | ✓ | ✓ |
 | Service principals | | | | | ✓ |
 | Case folder / files | | ✓ | ✓ | ✓ | ✓ |
-| Correlation + HTML report | | ✓ | ✓ | ✓ | ✓ |
+| Correlation + HTML report | | optional | optional | optional | optional |
 
 ---
 
 ### Post-Collection Analysis
 
-After every workflow run, CIRRUS automatically runs the cross-collector correlation engine and generates an HTML investigation report. You can also re-run both against any existing case folder:
+After collection completes, CIRRUS runs the cross-collector correlation engine and generates an HTML investigation report. How this works depends on how you invoked the workflow:
+
+**Interactive wizard (no `--tenant` flag):** CIRRUS prompts after the collection summary:
+```
+Run correlation analysis and generate HTML report? [Y/n]
+```
+Answer `n` to skip and move on immediately — you can always run it later.
+
+**Scripted mode (`--tenant` provided):** Analysis runs automatically unless you pass `--collect-only`.
+
+**`--collect-only` flag:** Skips analysis entirely for maximum speed. Use this when you know exactly what you need and time is critical — evidence is captured and preserved, analysis can follow later.
 
 ```bash
-# Re-run correlation and regenerate HTML report for an existing case
+# Scripted — evidence only, no analysis
+cirrus run ato --tenant contoso.com --user john@contoso.com --days 30 --collect-only
+
+# Run analysis on any case folder at any time
 cirrus analyze investigations/CONTOSO_20260317_143022
 ```
 
-This is useful when you add new collectors to an existing case, pull in data from another tool, or want to regenerate the report after manually editing output files.
+`cirrus analyze` is also useful when you want to re-run correlation after adding new collectors, pulling in data from another tool, or regenerating the report after manually reviewing output files.
 
-`cirrus analyze` prints a findings table to the terminal with a detail panel per finding, and writes:
+It writes:
 - `ioc_correlation.json` — machine-readable findings (SIEM-ingestible)
 - `ioc_correlation.txt` — formatted text report for case notes
 - `investigation_report.html` — full self-contained HTML investigation report

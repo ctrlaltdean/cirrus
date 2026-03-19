@@ -84,6 +84,7 @@ class BaseWorkflow:
         start_dt: datetime,
         end_dt: datetime,
         extra_params: dict[str, Any] | None = None,
+        run_analysis: bool = True,
     ) -> WorkflowResult:
         """
         Execute the workflow.
@@ -238,9 +239,12 @@ class BaseWorkflow:
         self.case.audit.log_workflow_complete(self.name, result.total_records)
 
         # ------------------------------------------------------------------ #
-        # Post-collection: cross-collector correlation                        #
+        # Post-collection: cross-collector correlation + HTML report          #
+        # Skipped when run_analysis=False (CLI handles it separately so it   #
+        # can prompt the analyst or respect --collect-only).                 #
         # ------------------------------------------------------------------ #
-        _run_correlation(self.case.case_dir, result, self.case)
+        if run_analysis:
+            _run_correlation(self.case.case_dir, result, self.case)
 
         return result
 

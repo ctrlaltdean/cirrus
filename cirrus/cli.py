@@ -165,6 +165,7 @@ TenantRunOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help="Ten
 BenchmarkOpt = Annotated[Optional[str], typer.Option("--benchmark", "-b", help="Benchmark: cis-m365, cis-entra, or all. Omit to use the wizard.")]
 LevelOpt = Annotated[Optional[str], typer.Option("--level", "-l", help="CIS levels: 1, 2, or all. Omit to use the wizard.")]
 OptionalTenantOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help="Tenant domain or GUID. Prompted if omitted.")]
+CollectOnlyOpt = Annotated[bool, typer.Option("--collect-only", help="Collect evidence only — skip correlation analysis and HTML report. Fastest option when you know exactly what you need.")]
 
 _DATE_FMT = "%Y-%m-%d"
 # Maximum UAL retention periods (informational — shown in the wizard).
@@ -670,6 +671,45 @@ def auth_cleanup(
 
 
 # ---------------------------------------------------------------------------
+# Analysis helper — prompt or flag, called after every workflow run
+# ---------------------------------------------------------------------------
+
+def _maybe_run_analysis(
+    case: "Case",
+    result: "WorkflowResult",
+    collect_only: bool,
+    interactive: bool,
+) -> None:
+    """
+    Run cross-collector correlation + HTML report after a workflow completes.
+
+    In scripted mode (tenant supplied via flag):  runs automatically unless
+    --collect-only was passed.
+
+    In interactive/wizard mode (tenant was prompted): asks the analyst before
+    running, defaulting to yes.
+    """
+    if collect_only:
+        console.print("[dim]Analysis skipped (--collect-only).[/dim]")
+        return
+
+    if interactive:
+        console.print()
+        if not Confirm.ask(
+            "[bold]Run correlation analysis and generate HTML report?[/bold]",
+            default=True,
+        ):
+            console.print(
+                "[dim]Analysis skipped. Run [bold]cirrus analyze "
+                f"{result.case_dir}[/bold] at any time to run it later.[/dim]"
+            )
+            return
+
+    from cirrus.workflows.base import _run_correlation
+    _run_correlation(case.case_dir, result, case)
+
+
+# ---------------------------------------------------------------------------
 # run commands
 # ---------------------------------------------------------------------------
 
@@ -686,6 +726,7 @@ def run_bec(
     users_file: UsersFileOpt = None,
     all_users: AllUsersOpt = False,
     client_id: ClientIdOpt = None,
+    collect_only: CollectOnlyOpt = False,
 ) -> None:
     """
     [bold]BEC Investigation Workflow[/bold]
@@ -699,7 +740,7 @@ def run_bec(
     Examples (scripted):
         cirrus run bec --tenant contoso.com --user john@contoso.com --days 30
         cirrus run bec --tenant contoso.com --users john@contoso.com --users jane@contoso.com --start-date 2026-03-01 --end-date 2026-03-18
-        cirrus run bec --tenant contoso.com --users-file targets.txt --days 14
+        cirrus run bec --tenant contoso.com --users-file targets.txt --days 14 --collect-only
         cirrus run bec --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-18
     """
     _banner()
@@ -757,15 +798,16 @@ def run_bec(
         tenant=tenant,
         start_dt=start_dt,
         end_dt=end_dt,
+        run_analysis=False,
     )
 
     render_summary(result)
-    case.close()
-
     if result.errors:
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors. Check case_audit.txt for details.[/yellow]")
-
     console.print("[bold green]BEC collection complete.[/bold green]")
+
+    _maybe_run_analysis(case, result, collect_only, interactive)
+    case.close()
 
 
 @run_app.command("ato")
@@ -781,6 +823,7 @@ def run_ato(
     users_file: UsersFileOpt = None,
     all_users: AllUsersOpt = False,
     client_id: ClientIdOpt = None,
+    collect_only: CollectOnlyOpt = False,
 ) -> None:
     """
     [bold]Account Takeover (ATO) Investigation Workflow[/bold]
@@ -800,7 +843,7 @@ def run_ato(
     Examples (scripted):
         cirrus run ato --tenant contoso.com --user john@contoso.com --days 30
         cirrus run ato --tenant contoso.com --users john@contoso.com --users jane@contoso.com --start-date 2026-03-01 --end-date 2026-03-18
-        cirrus run ato --tenant contoso.com --users-file targets.txt --days 14
+        cirrus run ato --tenant contoso.com --users-file targets.txt --days 14 --collect-only
         cirrus run ato --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-18
     """
     _banner()
@@ -858,15 +901,16 @@ def run_ato(
         tenant=tenant,
         start_dt=start_dt,
         end_dt=end_dt,
+        run_analysis=False,
     )
 
     render_summary(result)
-    case.close()
-
     if result.errors:
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors. Check case_audit.txt for details.[/yellow]")
-
     console.print("[bold green]ATO collection complete.[/bold green]")
+
+    _maybe_run_analysis(case, result, collect_only, interactive)
+    case.close()
 
 
 @run_app.command("bec-ato")
@@ -882,6 +926,7 @@ def run_bec_ato(
     users_file: UsersFileOpt = None,
     all_users: AllUsersOpt = False,
     client_id: ClientIdOpt = None,
+    collect_only: CollectOnlyOpt = False,
 ) -> None:
     """
     [bold]BEC + ATO Combined Investigation Workflow[/bold]
@@ -900,7 +945,7 @@ def run_bec_ato(
     Examples (scripted):
         cirrus run bec-ato --tenant contoso.com --user john@contoso.com --days 30
         cirrus run bec-ato --tenant contoso.com --users john@contoso.com --users jane@contoso.com --start-date 2026-03-01 --end-date 2026-03-18
-        cirrus run bec-ato --tenant contoso.com --users-file targets.txt --days 14
+        cirrus run bec-ato --tenant contoso.com --users-file targets.txt --days 14 --collect-only
     """
     _banner()
     interactive = tenant is None
@@ -957,15 +1002,16 @@ def run_bec_ato(
         tenant=tenant,
         start_dt=start_dt,
         end_dt=end_dt,
+        run_analysis=False,
     )
 
     render_summary(result)
-    case.close()
-
     if result.errors:
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors. Check case_audit.txt for details.[/yellow]")
-
     console.print("[bold green]BEC + ATO collection complete.[/bold green]")
+
+    _maybe_run_analysis(case, result, collect_only, interactive)
+    case.close()
 
 
 @run_app.command("full")
@@ -981,6 +1027,7 @@ def run_full(
     users_file: UsersFileOpt = None,
     all_users: AllUsersOpt = False,
     client_id: ClientIdOpt = None,
+    collect_only: CollectOnlyOpt = False,
 ) -> None:
     """
     [bold]Full Tenant Collection Workflow[/bold]
@@ -993,7 +1040,7 @@ def run_full(
     Examples (scripted):
         cirrus run full --tenant contoso.com --all-users --days 90
         cirrus run full --tenant contoso.com --all-users --start-date 2026-03-01 --end-date 2026-03-18
-        cirrus run full --tenant contoso.com --users-file targets.txt --days 30
+        cirrus run full --tenant contoso.com --users-file targets.txt --days 30 --collect-only
     """
     _banner()
     interactive = tenant is None
@@ -1055,15 +1102,16 @@ def run_full(
         tenant=tenant,
         start_dt=start_dt,
         end_dt=end_dt,
+        run_analysis=False,
     )
 
     render_summary(result)
-    case.close()
-
     if result.errors:
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors.[/yellow]")
-
     console.print("[bold green]Full collection complete.[/bold green]")
+
+    _maybe_run_analysis(case, result, collect_only, interactive)
+    case.close()
 
 
 # ---------------------------------------------------------------------------
