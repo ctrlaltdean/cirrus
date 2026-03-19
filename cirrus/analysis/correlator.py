@@ -39,6 +39,16 @@ Correlation rules (all findings include the supporting evidence records):
     A device code authentication sign-in for a user who also has a
     RECENTLY_REGISTERED device in the collection window.
 
+  password_spray                      [HIGH/MEDIUM]
+    A single IP with 10+ failed sign-in attempts against 5+ distinct accounts.
+    Elevated to HIGH when at least one targeted account also had a successful
+    sign-in from the same IP (spray may have succeeded).
+
+  mass_mail_access                    [HIGH/MEDIUM]
+    A user with 50+ MailItemsAccessed events in the UAL collection window.
+    Elevated to HIGH when the user also has interactive sign-in activity.
+    Indicates an attacker or compromised OAuth app bulk-reading mailbox content.
+
   new_account_with_signin             [MEDIUM]
     A user flagged RECENTLY_CREATED in the users collector who also appears
     in sign-in logs — may indicate an attacker-created backdoor account.
@@ -68,7 +78,13 @@ _COLLECTOR_FILES = {
     "oauth_grants":       "oauth_grants.json",
     "mailbox_rules":      "mailbox_rules.json",
     "mail_forwarding":    "mail_forwarding.json",
+    "unified_audit_log":  "unified_audit_log.json",
 }
+
+# Minimum thresholds for spray / mass-access rules
+_SPRAY_MIN_TARGETS  = 5   # distinct accounts from one IP to trigger password spray
+_SPRAY_MIN_FAILURES = 10  # total failed attempts from one IP to trigger password spray
+_MAIL_ACCESS_THRESHOLD = 50  # MailItemsAccessed events to trigger mass mail access
 
 # Suspicious sign-in flag prefixes that trigger persistence checks
 _SUSPICIOUS_SIGNIN_PREFIXES = (
@@ -224,6 +240,8 @@ class CorrelationEngine:
             self._rule_oauth_phishing_pattern,
             self._rule_bec_attack_pattern,
             self._rule_device_code_then_device_registered,
+            self._rule_password_spray,
+            self._rule_mass_mail_access,
             self._rule_new_account_with_signin,
             self._rule_cross_ip_correlation,
         ]
@@ -710,6 +728,239 @@ class CorrelationEngine:
                     "persists after password reset. Revoke all sign-in sessions, reset credentials, "
                     "and verify the device code sign-in was not user-initiated (check with the user). "
                     "Block legacy auth and device code flows via Conditional Access if not already done."
+                ),
+            ))
+
+        return findings
+
+    def _rule_password_spray(self) -> list[Finding]:
+        """
+        A single source IP with 10+ failed sign-in attempts against 5+ distinct
+        accounts within the collection window — the hallmark of a password spray
+        attack. Severity is elevated to HIGH when the same IP also has a
+        successful sign-in, indicating at least one credential was valid.
+        """
+        signin_records = self._d("signin_logs")
+        if not signin_records:
+            return []
+
+        # Group failed sign-ins by source IP
+        ip_to_failures: dict[str, list[dict]] = defaultdict(list)
+        for r in signin_records:
+            status = r.get("status") or {}
+            error_code = status.get("errorCode", 0)
+            if error_code != 0:
+                ip = r.get("ipAddress") or ""
+                if ip:
+                    ip_to_failures[ip].append(r)
+
+        findings: list[Finding] = []
+        reported_ips: set[str] = set()
+
+        for ip, failures in ip_to_failures.items():
+            distinct_targets = {
+                (r.get("userPrincipalName") or "").lower()
+                for r in failures
+                if r.get("userPrincipalName")
+            }
+            if len(distinct_targets) < _SPRAY_MIN_TARGETS:
+                continue
+            if len(failures) < _SPRAY_MIN_FAILURES:
+                continue
+            if ip in reported_ips:
+                continue
+            reported_ips.add(ip)
+
+            # Check whether any spray attempt succeeded (same IP, errorCode 0)
+            successful_users = {
+                (r.get("userPrincipalName") or "").lower()
+                for r in signin_records
+                if r.get("ipAddress") == ip
+                and (r.get("status") or {}).get("errorCode", -1) == 0
+                and r.get("userPrincipalName")
+            }
+
+            # Tally error codes for description context
+            error_counts: dict[int, int] = defaultdict(int)
+            for r in failures:
+                ec = (r.get("status") or {}).get("errorCode", 0)
+                if ec:
+                    error_counts[ec] += 1
+            top_error = max(error_counts, key=lambda k: error_counts[k]) if error_counts else 0
+
+            severity = "high" if successful_users else "medium"
+
+            evidence: list[Evidence] = []
+            for r in failures[:5]:
+                upn = r.get("userPrincipalName") or ""
+                ec = (r.get("status") or {}).get("errorCode", "?")
+                evidence.append(_evidence(r, "signin_logs", "createdDateTime",
+                    f"Failed sign-in for {upn} (errorCode {ec})"))
+            for upn in list(successful_users)[:2]:
+                hit = next(
+                    (r for r in signin_records
+                     if r.get("ipAddress") == ip
+                     and (r.get("status") or {}).get("errorCode", -1) == 0
+                     and (r.get("userPrincipalName") or "").lower() == upn),
+                    None,
+                )
+                if hit:
+                    evidence.append(_evidence(hit, "signin_logs", "createdDateTime",
+                        f"SUCCESSFUL sign-in for {upn} from spray IP"))
+
+            success_note = (
+                f" At least {len(successful_users)} account(s) had a SUCCESSFUL sign-in "
+                f"from this same IP ({', '.join(list(successful_users)[:3])}), indicating "
+                "the spray may have succeeded — those accounts require immediate investigation."
+            ) if successful_users else ""
+
+            target_sample = ", ".join(list(distinct_targets)[:5])
+            if len(distinct_targets) > 5:
+                target_sample += f", ... (+{len(distinct_targets) - 5} more)"
+
+            findings.append(Finding(
+                id="",
+                rule="password_spray",
+                severity=severity,
+                title=(
+                    f"Password spray — {len(failures)} failures across "
+                    f"{len(distinct_targets)} accounts from {ip}"
+                ),
+                user="",
+                description=(
+                    f"IP address {ip} attempted authentication against {len(distinct_targets)} distinct "
+                    f"accounts with {len(failures)} total failures (most common error code: {top_error}) "
+                    f"during the collection window. Targeted accounts: {target_sample}.{success_note}"
+                ),
+                evidence=evidence,
+                recommendation=(
+                    f"Look up {ip} in AbuseIPDB, VirusTotal, or Shodan to assess reputation. "
+                    "If spray is confirmed: enforce or verify MFA for all targeted accounts, "
+                    "review accounts that had successful sign-ins from this IP for post-access activity, "
+                    "and consider blocking the IP via Conditional Access Named Locations. "
+                    "Check for account lockouts that may have alerted the targeted users."
+                ),
+            ))
+
+        return findings
+
+    def _rule_mass_mail_access(self) -> list[Finding]:
+        """
+        A user with 50+ MailItemsAccessed UAL events in the collection window.
+        Attackers and compromised OAuth applications bulk-read mailbox content
+        for reconnaissance and financial fraud targeting. Severity is HIGH
+        when the user also has interactive sign-in activity in the window.
+        """
+        ual_records = self._d("unified_audit_log")
+        signin_records = self._d("signin_logs")
+        if not ual_records:
+            return []
+
+        # Group MailItemsAccessed events by user
+        by_user: dict[str, list[dict]] = defaultdict(list)
+        for r in ual_records:
+            op = (r.get("operation") or r.get("Operation") or "").lower()
+            if op == "mailitemsaccessed":
+                upn = (r.get("userId") or r.get("UserId") or "").lower()
+                if upn and "@" in upn:
+                    by_user[upn].append(r)
+
+        users_with_signin: set[str] = {
+            (r.get("userPrincipalName") or "").lower()
+            for r in signin_records
+            if r.get("userPrincipalName")
+        }
+
+        findings: list[Finding] = []
+        for upn, records in by_user.items():
+            if len(records) < _MAIL_ACCESS_THRESHOLD:
+                continue
+
+            has_signin = upn in users_with_signin
+
+            # Extract app IDs from auditData payload
+            app_ids: set[str] = set()
+            for r in records:
+                audit_data = r.get("auditData") or {}
+                if isinstance(audit_data, str):
+                    try:
+                        import json as _json
+                        audit_data = _json.loads(audit_data)
+                    except Exception:
+                        audit_data = {}
+                app_id = (
+                    audit_data.get("AppId")
+                    or audit_data.get("ApplicationId")
+                    or ""
+                )
+                if app_id:
+                    app_ids.add(app_id)
+
+            evidence: list[Evidence] = []
+            for r in records[:4]:
+                ts = r.get("createdDateTime") or r.get("CreationTime") or ""
+                audit_data = r.get("auditData") or {}
+                if isinstance(audit_data, str):
+                    try:
+                        import json as _json
+                        audit_data = _json.loads(audit_data)
+                    except Exception:
+                        audit_data = {}
+                app_id = (
+                    audit_data.get("AppId")
+                    or audit_data.get("ApplicationId")
+                    or ""
+                )
+                app_note = f" via app {app_id[:20]}" if app_id else ""
+                evidence.append(Evidence(
+                    collector="unified_audit_log",
+                    timestamp=ts,
+                    summary=f"MailItemsAccessed{app_note}",
+                    flags=[],
+                ))
+
+            if has_signin:
+                user_signins = [
+                    r for r in signin_records
+                    if (r.get("userPrincipalName") or "").lower() == upn
+                ]
+                for r in user_signins[:2]:
+                    country = (r.get("location") or {}).get("countryOrRegion", "unknown")
+                    evidence.append(_evidence(r, "signin_logs", "createdDateTime",
+                        f"Sign-in from {country}"))
+
+            app_note = (
+                f" across {len(app_ids)} distinct app(s) ({', '.join(list(app_ids)[:3])})"
+                if app_ids else ""
+            )
+            access_note = (
+                f"{upn} also has interactive sign-in activity in this window."
+                if has_signin else
+                "No interactive sign-in seen for this user — access may be via a "
+                "delegated OAuth app token that survived a password reset."
+            )
+
+            findings.append(Finding(
+                id="",
+                rule="mass_mail_access",
+                severity="high" if has_signin else "medium",
+                title=f"Mass mailbox access — {len(records)} MailItemsAccessed events for {upn}",
+                user=upn,
+                description=(
+                    f"{upn} has {len(records)} MailItemsAccessed events in the collection "
+                    f"window{app_note}. This volume is consistent with an attacker or compromised "
+                    "application bulk-reading mailbox content — a key indicator of BEC "
+                    f"reconnaissance and data exfiltration. {access_note}"
+                ),
+                evidence=evidence,
+                recommendation=(
+                    "Identify the application(s) responsible by reviewing the AppId field in the "
+                    "UAL auditData payload — check if each app is sanctioned. "
+                    "If the app is not recognized: revoke its OAuth grant, revoke all sign-in "
+                    "sessions for the user, and reset credentials. "
+                    "Check whether mail Send events follow the MailItemsAccessed events in the UAL — "
+                    "that sequence indicates reconnaissance that escalated to active BEC fraud. "
+                    "Preserve UAL records as evidence before revoking access."
                 ),
             ))
 

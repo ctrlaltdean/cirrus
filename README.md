@@ -791,7 +791,7 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 ## Roadmap
 
 - [ ] App registration / service principal auth (`--client-id` / `--client-secret`) for unattended/automated collection
-- [ ] Additional correlation rules (password spray detection, mass mail access / exfiltration indicators)
+- [x] Additional correlation rules: password spray detection, mass mail access / exfiltration indicators
 - [ ] SIEM push integrations (Splunk HEC, Microsoft Sentinel)
 - [x] Quick triage command (`cirrus triage`) — 8 parallel checks, results in seconds
 - [x] HTML investigation report (`investigation_report.html`) — self-contained, print-friendly, offline-capable
