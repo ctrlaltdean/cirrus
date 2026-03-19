@@ -123,6 +123,48 @@ def get_token_device_code(tenant_id: str, client_id: str = DEFAULT_CLIENT_ID) ->
     return result["access_token"]
 
 
+def get_token_silent(tenant_id: str, client_id: str = DEFAULT_CLIENT_ID) -> str | None:
+    """
+    Return a cached access token without prompting for browser login.
+    Returns None if no valid cached token exists.
+    """
+    cache = _load_cache()
+    app = _build_app(tenant_id, client_id, cache)
+    accounts = app.get_accounts()
+    if not accounts:
+        return None
+    result = app.acquire_token_silent(GRAPH_SCOPES, account=accounts[0])
+    _save_cache(cache)
+    if result and "access_token" in result:
+        return result["access_token"]
+    return None
+
+
+def lookup_service_principal(token: str, client_id: str) -> dict | None:
+    """
+    Look up the service principal for client_id in the authenticated tenant.
+    Uses Directory.Read.All (already in GRAPH_SCOPES).
+    Returns a dict with 'id', 'displayName', 'appId', or None if not found.
+    """
+    import requests as _requests
+    url = (
+        "https://graph.microsoft.com/v1.0/servicePrincipals"
+        f"?$filter=appId eq '{client_id}'&$select=id,displayName,appId"
+    )
+    try:
+        resp = _requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+        items = resp.json().get("value", [])
+        return items[0] if items else None
+    except Exception:
+        return None
+
+
 def logout(tenant_id: str, client_id: str = DEFAULT_CLIENT_ID) -> int:
     """
     Remove all cached accounts for a tenant.

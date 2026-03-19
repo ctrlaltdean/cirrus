@@ -5,6 +5,7 @@ Commands:
     cirrus auth login     — authenticate to a tenant
     cirrus auth logout    — clear cached credentials
     cirrus auth status    — show cached tenants
+    cirrus auth cleanup   — clear credentials and print tenant cleanup instructions
 
     cirrus run bec        — run BEC investigation workflow
     cirrus run full       — run full-tenant collection
@@ -44,10 +45,13 @@ from rich.table import Table
 
 from cirrus import __version__
 from cirrus.auth.authenticator import (
+    DEFAULT_CLIENT_ID,
     AuthenticationError,
     get_token,
+    get_token_silent,
     list_cached_tenants,
     logout,
+    lookup_service_principal,
 )
 from cirrus.compliance.report import render_terminal, save_report
 from cirrus.compliance.runner import ComplianceRunner
@@ -565,6 +569,104 @@ def auth_status() -> None:
     for t in tenants:
         table.add_row(t["username"], t["tenant_id"], t["environment"])
     console.print(table)
+
+
+@auth_app.command("cleanup")
+def auth_cleanup(
+    tenant: TenantOpt,
+    client_id: ClientIdOpt = None,
+) -> None:
+    """
+    Clear local credentials and print tenant-side cleanup instructions.
+
+    Removes the cached token for the tenant, looks up the service principal
+    that was created when CIRRUS authenticated (if a cached token is still
+    available), and prints the exact PowerShell command and portal path an
+    administrator needs to remove it from Enterprise Applications.
+
+    Run this after an investigation is complete to leave no CIRRUS footprint
+    in the customer tenant.
+    """
+    _banner(skip_update_check=True)
+    effective_client_id = client_id or DEFAULT_CLIENT_ID
+
+    # ── Step 1: Try a silent token lookup for the SP query ─────────────────
+    console.print(f"\n[bold]Tenant:[/bold] [cyan]{tenant}[/cyan]\n")
+
+    sp_id: str | None = None
+    sp_name: str | None = None
+
+    token = get_token_silent(tenant, effective_client_id)
+    if token:
+        console.print("[dim]Querying tenant for service principal...[/dim]")
+        sp = lookup_service_principal(token, effective_client_id)
+        if sp:
+            sp_id = sp.get("id", "")
+            sp_name = sp.get("displayName", "")
+            console.print(
+                Panel(
+                    f"[bold]Display name:[/bold] {sp_name}\n"
+                    f"[bold]App ID:[/bold]       {effective_client_id}\n"
+                    f"[bold]SP Object ID:[/bold] [cyan]{sp_id}[/cyan]",
+                    title="Service Principal Found",
+                    border_style="bright_blue",
+                )
+            )
+        else:
+            console.print(
+                "[yellow]Service principal not found in this tenant.[/yellow]\n"
+                "[dim]It may have already been removed, or the account may not have "
+                "consented yet.[/dim]"
+            )
+    else:
+        console.print(
+            "[yellow]No cached token available — cannot look up service principal.[/yellow]\n"
+            "[dim]Run [bold]cirrus auth login[/bold] first if you need the SP Object ID.[/dim]"
+        )
+
+    # ── Step 2: Clear local token cache ────────────────────────────────────
+    console.print()
+    count = logout(tenant, effective_client_id)
+    if count:
+        console.print(f"[green]✓ Local token cache cleared[/green] — {count} cached account(s) removed for [cyan]{tenant}[/cyan].")
+    else:
+        console.print(f"[dim]No cached credentials found for {tenant} — local cache already clear.[/dim]")
+
+    # ── Step 3: Admin instructions ─────────────────────────────────────────
+    sp_id_display = sp_id or "<SP-Object-ID>"
+    app_name_display = sp_name or (
+        "Microsoft Graph Command Line Tools"
+        if effective_client_id == DEFAULT_CLIENT_ID
+        else effective_client_id
+    )
+
+    ps_block = (
+        f"Connect-MgGraph -Scopes \"Application.ReadWrite.All\"\n"
+        f"Remove-MgServicePrincipal -ServicePrincipalId {sp_id_display}"
+    )
+    if not sp_id:
+        ps_block += (
+            "\n\n# If you don't have the SP Object ID, find it first:\n"
+            f"$sp = Get-MgServicePrincipal -Filter \"appId eq '{effective_client_id}'\"\n"
+            f"Remove-MgServicePrincipal -ServicePrincipalId $sp.Id"
+        )
+
+    console.print(
+        Panel(
+            "[bold]PowerShell[/bold] [dim](Microsoft.Graph module required)[/dim]\n"
+            f"  [cyan]{ps_block.replace(chr(10), chr(10) + '  ')}[/cyan]\n\n"
+            "[bold]Entra admin center[/bold]\n"
+            "  1. Sign in to https://entra.microsoft.com\n"
+            f"  2. Navigate to: Identity → Applications → Enterprise applications\n"
+            f"  3. Search for: [bold]{app_name_display}[/bold]\n"
+            "  4. Open the result → Properties → Delete\n\n"
+            "[dim]Deleting the service principal removes the entry from Enterprise\n"
+            "Applications and revokes all delegated permission grants in one step.\n"
+            "No further action is required after the SP is deleted.[/dim]",
+            title="[bold]Tenant Cleanup — Admin Steps Required[/bold]",
+            border_style="yellow",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
