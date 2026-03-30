@@ -27,6 +27,7 @@ from cirrus.collectors.oauth_grants import OAuthGrantsCollector
 from cirrus.collectors.risky_users import RiskySignInsCollector, RiskyUsersCollector
 from cirrus.collectors.service_principals import ServicePrincipalsCollector
 from cirrus.collectors.signin_logs import SignInLogsCollector
+from cirrus.collectors.sp_signin_logs import SPSignInLogsCollector
 from cirrus.collectors.unified_audit import UnifiedAuditCollector
 from cirrus.collectors.users import UsersCollector
 from cirrus.workflows.base import BaseWorkflow
@@ -98,6 +99,11 @@ class FullWorkflow(BaseWorkflow):
                 ServicePrincipalsCollector,
                 {"days": None},
                 "Service principals",
+            ),
+            (
+                SPSignInLogsCollector,
+                {"start_dt": start_dt, "end_dt": end_dt},
+                "Service principal sign-in logs",
             ),
             (
                 UnifiedAuditCollector,

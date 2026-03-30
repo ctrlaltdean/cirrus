@@ -144,6 +144,21 @@ _COLLECTOR_CONFIG: dict[str, dict] = {
             ("Deliver+Forward", "deliverToMailboxAndForward"),
         ],
     },
+    "sp_signin_logs": {
+        "title": "SP Sign-In Logs",
+        "filename": "sp_signin_logs.json",
+        "timestamp_key": "createdDateTime",
+        "user_key": "servicePrincipalName",
+        "columns": [
+            ("App / SP",        "servicePrincipalName"),
+            ("Time (UTC)",      "createdDateTime"),
+            ("IP",              "ipAddress"),
+            ("Country",         "location.countryOrRegion"),
+            ("Resource",        "resourceDisplayName"),
+            ("Credential",      "servicePrincipalCredentialType"),
+            ("Result",          "status.errorCode"),
+        ],
+    },
 }
 
 _SEV_COLOR = {"high": "#ef4444", "medium": "#f97316", "low": "#6b7280"}
@@ -661,9 +676,17 @@ def _collector_stat_cards(stats: dict) -> str:
 
 
 def _html_tab_nav(data: dict, corr: dict, timeline: list, enrichment: dict | None = None) -> str:
-    tabs = [("correlation", f"Correlation ({len(corr.get('findings') or [])})"),
+    findings = corr.get("findings") or []
+    tabs = [("correlation", f"Correlation ({len(findings)})"),
             ("timeline",    f"Timeline ({len(timeline)})"),
             ("users",       "Users")]
+    if findings:
+        high_n = sum(1 for f in findings if f.get("severity") == "high")
+        rem_label = f"Remediation ({len(findings)}"
+        if high_n:
+            rem_label += f", {high_n}⚠"
+        rem_label += ")"
+        tabs.append(("remediation", rem_label))
     if enrichment and enrichment.get("total_ips", 0) > 0:
         suspicious = enrichment.get("suspicious_count", 0)
         label = f"IP Enrichment ({enrichment['total_ips']} IPs"
@@ -715,6 +738,15 @@ def _html_correlation_tab(corr: dict) -> str:
             for ev in (f.get("evidence") or [])
         )
         flag_badges = " ".join(_flag_badge(fl) for fl in (f.get("ioc_flags") or [])[:8])
+        mitre = f.get("mitre_techniques") or []
+        mitre_html = ""
+        if mitre:
+            badges = " ".join(
+                f'<span class="flag-badge" style="background:#eff6ff;color:#1d4ed8;'
+                f'border:1px solid #bfdbfe;font-family:sans-serif">{_e(t)}</span>'
+                for t in mitre
+            )
+            mitre_html = f'<div style="margin-top:8px"><span style="font-size:11px;color:var(--muted);font-weight:600">MITRE ATT&amp;CK&nbsp;</span>{badges}</div>'
         cards.append(f"""
 <div class="finding-card" style="border-left:4px solid {color}">
   <div class="finding-header" onclick="toggleFinding({i})" style="background:{bg}20">
@@ -728,6 +760,7 @@ def _html_correlation_tab(corr: dict) -> str:
   <div class="finding-body" id="fb-{i}">
     <p class="desc">{_e(f.get('description',''))}</p>
     {'<div style="margin-top:8px">'+flag_badges+'</div>' if flag_badges else ''}
+    {mitre_html}
     {f'<table class="evidence-table"><thead><tr><th>Collector</th><th>Timestamp</th><th>Summary</th></tr></thead><tbody>{evidence_rows}</tbody></table>' if evidence_rows else ''}
     <div class="rec">{_e(f.get('recommendation',''))}</div>
   </div>
@@ -866,6 +899,173 @@ def _html_collector_tab(key: str, records: list[dict]) -> str:
     )
 
 
+def _html_remediation_tab(corr: dict) -> str:
+    """
+    Render a remediation checklist tab.
+
+    Extracts the `recommendation` field from every correlation finding and
+    supplements it with rule-specific additional action items.  Items are
+    sorted HIGH → MEDIUM → LOW and rendered as interactive checkboxes so
+    analysts can tick off actions as they work through the investigation.
+    """
+    findings = corr.get("findings") or []
+    if not findings:
+        return (
+            '<div class="tab-content" id="remediation">'
+            '<div class="section-title">Remediation Checklist</div>'
+            '<p class="no-data">No correlation findings — no remediation actions required.</p>'
+            '</div>'
+        )
+
+    # Extra per-rule action items supplementing the `recommendation` field
+    _RULE_ACTIONS: dict[str, list[str]] = {
+        "suspicious_signin_then_persistence": [
+            "Revoke all active sessions: az ad user revoke-sign-in-sessions",
+            "Force password reset from a trusted admin account",
+            "Review and remove attacker-added MFA methods or registered devices",
+        ],
+        "password_reset_then_mfa_registered": [
+            "Audit who initiated the password reset and whether it was authorised",
+            "Remove attacker-registered authenticator app or phone number",
+            "Enable Conditional Access policy requiring compliant devices",
+        ],
+        "privilege_escalation_after_signin": [
+            "Remove the unauthorised role assignment immediately",
+            "Review all actions taken by the account while the role was held",
+            "Enable Privileged Identity Management (PIM) for just-in-time role activation",
+        ],
+        "oauth_phishing_pattern": [
+            "Revoke the OAuth consent grant: az ad app permission delete",
+            "Block the offending application in the Entra portal (Enterprise Apps → disable)",
+            "Enable admin consent requirements so users cannot self-consent to new apps",
+        ],
+        "bec_attack_pattern": [
+            "Delete suspicious inbox rules immediately",
+            "Remove external SMTP forwarding from mailbox settings",
+            "Check sent items and deleted items for evidence of fraudulent communications",
+            "Notify finance/HR if the attack window overlaps with financial transactions",
+        ],
+        "device_code_then_device_registered": [
+            "Remove the attacker-registered device from Entra ID",
+            "Revoke refresh tokens — device code tokens are long-lived",
+            "Enable Conditional Access policy blocking device code flow where not required",
+        ],
+        "password_spray": [
+            "Block the source IP in Conditional Access Named Locations",
+            "Enable Entra ID Smart Lockout if not already configured",
+            "Reset passwords for all accounts targeted in the spray window",
+        ],
+        "mass_mail_access": [
+            "Determine which OAuth app or session accessed the mail — revoke it",
+            "Review MailItemsAccessed audit log records for exfiltrated content",
+            "Assess whether any sensitive data requires breach notification",
+        ],
+        "new_account_with_signin": [
+            "Disable or delete the backdoor account immediately",
+            "Audit what the account accessed during its active window",
+            "Review app registrations and OAuth grants created by the account",
+        ],
+        "cross_ip_correlation": [
+            "Pivot on the shared IP in both sign-in and audit logs for full activity timeline",
+            "Block the IP in Conditional Access if it is confirmed malicious",
+        ],
+        "hosting_provider_signin": [
+            "Investigate whether the cloud/proxy IP is a known attacker infrastructure",
+            "Require compliant or hybrid-joined devices via Conditional Access",
+        ],
+    }
+
+    # Group findings by severity
+    sev_order = {"high": 0, "medium": 1, "low": 2}
+    sorted_findings = sorted(findings, key=lambda f: sev_order.get(f.get("severity", "low"), 2))
+
+    sev_color = {"high": "#ef4444", "medium": "#f97316", "low": "#6b7280"}
+    sev_bg    = {"high": "#fef2f2", "medium": "#fff7ed", "low": "#f8fafc"}
+
+    sections: list[str] = []
+    item_index = 0  # for unique checkbox ids
+
+    for f in sorted_findings:
+        sev = f.get("severity", "low")
+        color = sev_color.get(sev, "#6b7280")
+        bg = sev_bg.get(sev, "#f8fafc")
+        rule = f.get("rule", "")
+        user = f.get("user") or "—"
+        title = f.get("title") or rule
+        recommendation = f.get("recommendation") or ""
+        extra_actions = _RULE_ACTIONS.get(rule, [])
+
+        # Build checklist items: recommendation first, then rule extras
+        all_actions: list[str] = []
+        if recommendation:
+            all_actions.append(recommendation)
+        all_actions.extend(extra_actions)
+
+        items_html: list[str] = []
+        for action in all_actions:
+            item_index += 1
+            cid = f"chk_{item_index}"
+            items_html.append(
+                f'<div style="display:flex;align-items:flex-start;gap:10px;'
+                f'margin-bottom:8px">'
+                f'<input type="checkbox" id="{cid}" style="margin-top:3px;'
+                f'accent-color:{color};width:15px;height:15px;flex-shrink:0">'
+                f'<label for="{cid}" style="cursor:pointer;font-size:13px;'
+                f'line-height:1.5">{_e(action)}</label>'
+                f'</div>'
+            )
+
+        mitre = f.get("mitre_techniques") or []
+        mitre_badges = ""
+        if mitre:
+            mitre_badges = (
+                '<div style="margin-top:8px">'
+                '<span style="font-size:11px;color:var(--muted);font-weight:600">'
+                'MITRE ATT&amp;CK&nbsp;</span>'
+                + " ".join(
+                    f'<span class="flag-badge" style="background:#eff6ff;color:#1d4ed8;'
+                    f'border:1px solid #bfdbfe">{_e(t)}</span>'
+                    for t in mitre
+                )
+                + '</div>'
+            )
+
+        sections.append(
+            f'<div style="border:1px solid {color}40;border-radius:8px;'
+            f'margin-bottom:18px;background:{bg};overflow:hidden">'
+            f'<div style="background:{color}15;border-bottom:1px solid {color}30;'
+            f'padding:10px 16px;display:flex;align-items:center;gap:12px">'
+            f'<span style="background:{color};color:#fff;font-size:11px;font-weight:700;'
+            f'padding:2px 8px;border-radius:4px;letter-spacing:.5px">'
+            f'{_e(sev.upper())}</span>'
+            f'<span style="font-weight:600;font-size:14px">{_e(title)}</span>'
+            f'<span style="font-size:12px;color:var(--muted);margin-left:auto">'
+            f'Account: {_e(user)}</span>'
+            f'</div>'
+            f'<div style="padding:14px 18px">'
+            f'{"".join(items_html)}'
+            f'{mitre_badges}'
+            f'</div>'
+            f'</div>'
+        )
+
+    total = len(findings)
+    high_n = sum(1 for f in findings if f.get("severity") == "high")
+    med_n  = sum(1 for f in findings if f.get("severity") == "medium")
+
+    return (
+        f'<div class="tab-content" id="remediation">'
+        f'<div class="section-title">Remediation Checklist</div>'
+        f'<p style="font-size:13px;color:var(--muted);margin-bottom:20px">'
+        f'{total} finding(s) — <span style="color:#ef4444;font-weight:600">'
+        f'{high_n} HIGH</span> &nbsp; '
+        f'<span style="color:#f97316;font-weight:600">{med_n} MEDIUM</span>'
+        f'&nbsp;·&nbsp; Tick each item as you complete it.</p>'
+        f'{"".join(sections)}'
+        f'</div>'
+    )
+
+
 def _html_enrichment_tab(enrichment: dict) -> str:
     ips_dict: dict[str, dict] = enrichment.get("ips") or {}
     total = enrichment.get("total_ips", 0)
@@ -967,12 +1167,15 @@ def generate_report(case_dir: Path) -> Path:
     timeline = _build_timeline(data)
     user_summary = _build_user_summary(data)
 
-    # Tab content: correlation, timeline, users, optional enrichment, then one tab per collector
+    # Tab content: correlation, timeline, users, optional remediation, optional enrichment,
+    # then one tab per collector
     tab_contents: list[str] = [
         _html_correlation_tab(corr),
         _html_timeline_tab(timeline),
         _html_users_tab(user_summary),
     ]
+    if corr.get("findings"):
+        tab_contents.append(_html_remediation_tab(corr))
     if enrichment and enrichment.get("total_ips", 0) > 0:
         tab_contents.append(_html_enrichment_tab(enrichment))
     for key, records in data.items():

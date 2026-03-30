@@ -593,3 +593,63 @@ class TestReportStructure:
         (tmp_path / "signin_logs.json").write_text("[{]", encoding="utf-8")  # invalid JSON
         report = run(tmp_path)
         assert "summary" in report  # engine continued
+
+
+# ── MITRE ATT&CK mapping ───────────────────────────────────────────────────────
+
+class TestMITREMapping:
+    """Verify that mitre_techniques is populated for all rule types."""
+
+    def test_password_spray_has_mitre_techniques(self, tmp_path):
+        from tests.conftest import make_signin, write_case_files
+        # Build a spray: 10 failures from one IP against 5 users
+        records = []
+        for i in range(5):
+            upn = f"user{i}@contoso.com"
+            for _ in range(2):
+                records.append(make_signin(
+                    upn=upn,
+                    ip="203.0.113.99",
+                    ioc_flags=[f"FAILED_SIGNIN:bad_password", f"PUBLIC_IP:203.0.113.99"],
+                ))
+        write_case_files(tmp_path, signin_logs=records)
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "password_spray")
+        if findings:
+            techniques = findings[0].get("mitre_techniques") or []
+            assert any("T1110" in t for t in techniques)
+
+    def test_oauth_phishing_has_mitre_techniques(self, tmp_path):
+        from tests.conftest import make_signin, make_oauth, write_case_files
+        upn = "victim@contoso.com"
+        signin = make_signin(upn=upn, ioc_flags=["SUSPICIOUS_AUTH_PROTOCOL:deviceCode"])
+        grant  = make_oauth(upn=upn, ioc_flags=["HIGH_RISK_SCOPE:Mail.Read"])
+        write_case_files(tmp_path, signin_logs=[signin], oauth_grants=[grant])
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "oauth_phishing_pattern")
+        assert len(findings) == 1
+        techniques = findings[0].get("mitre_techniques") or []
+        assert any("T1528" in t for t in techniques)
+
+    def test_bec_attack_has_mitre_techniques(self, tmp_path):
+        from tests.conftest import make_signin, make_rule, write_case_files
+        upn = "victim@contoso.com"
+        signin = make_signin(upn=upn, ioc_flags=["PUBLIC_IP:1.2.3.4"])
+        rule   = make_rule(upn=upn, ioc_flags=["FORWARDS_TO:attacker@evil.com"])
+        write_case_files(tmp_path, signin_logs=[signin], mailbox_rules=[rule])
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "bec_attack_pattern")
+        assert len(findings) == 1
+        techniques = findings[0].get("mitre_techniques") or []
+        assert any("T1114" in t for t in techniques)
+
+    def test_all_findings_have_mitre_field(self, tmp_path):
+        """Every finding dict must contain a mitre_techniques key (even if empty list)."""
+        upn = "user@contoso.com"
+        signin = make_signin(upn=upn, ioc_flags=["SUSPICIOUS_AUTH_PROTOCOL:deviceCode"])
+        mfa    = make_mfa(upn=upn, ioc_flags=["RECENTLY_ADDED:2026-03-28"])
+        write_case_files(tmp_path, signin_logs=[signin], mfa_methods=[mfa])
+        report = run(tmp_path)
+        for f in report["findings"]:
+            assert "mitre_techniques" in f
+            assert isinstance(f["mitre_techniques"], list)

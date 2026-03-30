@@ -48,6 +48,7 @@ from cirrus.collectors.oauth_grants import OAuthGrantsCollector
 from cirrus.collectors.registered_devices import RegisteredDevicesCollector
 from cirrus.collectors.risky_users import RiskySignInsCollector, RiskyUsersCollector
 from cirrus.collectors.signin_logs import SignInLogsCollector
+from cirrus.collectors.sp_signin_logs import SPSignInLogsCollector
 from cirrus.collectors.unified_audit import UnifiedAuditCollector
 from cirrus.collectors.users import UsersCollector
 from cirrus.workflows.base import BaseWorkflow
@@ -114,6 +115,11 @@ class ATOWorkflow(BaseWorkflow):
                 AppRegistrationsCollector,
                 {"start_dt": start_dt, "end_dt": end_dt},
                 "App registrations",
+            ),
+            (
+                SPSignInLogsCollector,
+                {"start_dt": start_dt, "end_dt": end_dt},
+                "Service principal sign-in logs",
             ),
             (
                 UnifiedAuditCollector,

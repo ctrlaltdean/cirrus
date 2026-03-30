@@ -1064,8 +1064,27 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 
 ## Roadmap
 
+**In progress / next up:**
+- [ ] Service principal sign-in logs collector — closes the blind spot where attackers pivot to OAuth app tokens after initial compromise; separate Graph endpoint from user sign-ins
+- [ ] Tenant-wide hunt (`cirrus hunt`) — surface suspicious accounts and risky OAuth apps across the whole tenant without a known starting account
+- [ ] Tenant-wide OAuth app inventory — which apps have been granted consent across the tenant in the last N days; identifies rogue app phishing campaigns
+- [ ] MITRE ATT&CK mapping — attach technique IDs (T1078, T1528, T1110.003, etc.) to correlation findings for SIEM integration and reporting
+- [ ] Remediation checklist — dedicated report section mapping each finding to a prioritised, checkbox-style action list
+
+**Planned:**
+- [ ] PIM role activation history — Privileged Identity Management activation logs; currently invisible in main audit log
+- [ ] Executive summary / management report — non-technical 1-page summary for client handoff
+- [ ] Case notes (`cirrus case note`) — analyst annotations that persist into the HTML report
+- [ ] Evidence packaging (`cirrus case package`) — zip with SHA-256 manifest for legal handoff
+- [ ] Domain enrichment — WHOIS age and MX lookups on forwarding destinations and external email addresses flagged by collectors
 - [ ] App registration / service principal auth (`--client-id` / `--client-secret`) for unattended/automated collection
 - [ ] SIEM push integrations (Splunk HEC, Microsoft Sentinel)
+- [ ] VirusTotal enrichment — broader IP/domain reputation alongside AbuseIPDB
+- [ ] Conditional Access coverage gaps — identify successful sign-ins that matched zero CA policies
+- [ ] Stale account enumeration — enabled/licensed users with no sign-in in 90+ days (prime low-noise ATO targets)
+- [ ] Watch mode (`cirrus watch`) — recurring triage on a watchlist; useful for active retainers
+
+**Completed:**
 - [x] IP enrichment (`cirrus enrich`) — geo/ASN/hosting/proxy/Tor via ip-api.com + optional AbuseIPDB abuse scoring
 - [x] Blast radius assessment (`cirrus blast-radius`) — 6 parallel Graph API checks mapping account access footprint
 - [x] Additional correlation rules: password spray, mass mail access, hosting-provider sign-in (11 rules total)

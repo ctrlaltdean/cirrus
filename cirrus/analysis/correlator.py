@@ -86,6 +86,7 @@ _COLLECTOR_FILES = {
     "mailbox_rules":      "mailbox_rules.json",
     "mail_forwarding":    "mail_forwarding.json",
     "unified_audit_log":  "unified_audit_log.json",
+    "sp_signin_logs":     "sp_signin_logs.json",
 }
 
 # Minimum thresholds for spray / mass-access rules
@@ -126,7 +127,58 @@ class Finding:
     description: str
     evidence: list[Evidence]
     recommendation: str
-    ioc_flags: list[str] = field(default_factory=list)  # de-duplicated flags from evidence
+    ioc_flags: list[str] = field(default_factory=list)      # de-duplicated flags from evidence
+    mitre_techniques: list[str] = field(default_factory=list)  # ATT&CK technique IDs
+
+
+# ── MITRE ATT&CK technique mappings ───────────────────────────────────────────
+# Technique IDs reference the Enterprise ATT&CK matrix v15.
+# Format: "TXXXX[.YYY] — Name" for human readability in reports.
+
+_RULE_TECHNIQUES: dict[str, list[str]] = {
+    "suspicious_signin_then_persistence": [
+        "T1078 — Valid Accounts",
+        "T1556.006 — Modify Auth Process: Multi-Factor Authentication",
+    ],
+    "password_reset_then_mfa_registered": [
+        "T1098.005 — Account Manipulation: Device Registration",
+        "T1556.006 — Modify Auth Process: Multi-Factor Authentication",
+    ],
+    "privilege_escalation_after_signin": [
+        "T1078 — Valid Accounts",
+        "T1548 — Abuse Elevation Control Mechanism",
+        "T1098.003 — Account Manipulation: Additional Cloud Roles",
+    ],
+    "oauth_phishing_pattern": [
+        "T1528 — Steal Application Access Token",
+        "T1566 — Phishing",
+    ],
+    "bec_attack_pattern": [
+        "T1114.003 — Email Collection: Email Forwarding Rule",
+        "T1020 — Automated Exfiltration",
+    ],
+    "device_code_then_device_registered": [
+        "T1528 — Steal Application Access Token",
+        "T1098.005 — Account Manipulation: Device Registration",
+    ],
+    "password_spray": [
+        "T1110.003 — Brute Force: Password Spraying",
+    ],
+    "mass_mail_access": [
+        "T1114.002 — Email Collection: Remote Email Collection",
+    ],
+    "new_account_with_signin": [
+        "T1136.003 — Create Account: Cloud Account",
+        "T1078.004 — Valid Accounts: Cloud Accounts",
+    ],
+    "cross_ip_correlation": [
+        "T1078 — Valid Accounts",
+    ],
+    "hosting_provider_signin": [
+        "T1090 — Proxy",
+        "T1078 — Valid Accounts",
+    ],
+}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -260,6 +312,7 @@ class CorrelationEngine:
                 for f in rule_findings:
                     f.id = _next_id()
                     f.ioc_flags = _dedup_flags(f.evidence)
+                    f.mitre_techniques = _RULE_TECHNIQUES.get(f.rule, [])
                 findings.extend(rule_findings)
             except Exception:
                 pass  # Never let a broken rule crash the whole workflow
@@ -1306,6 +1359,11 @@ def _write_text_report(report: dict[str, Any], findings: list[Finding], path: Pa
                 if len(f.ioc_flags) > 6:
                     flag_str += f"  ... (+{len(f.ioc_flags) - 6} more)"
                 lines += _wrap(f"Flags: {flag_str}", 76, "  ") + [""]
+
+            # MITRE ATT&CK techniques
+            if f.mitre_techniques:
+                lines.append(f"  MITRE ATT&CK: {' · '.join(f.mitre_techniques)}")
+                lines.append("")
 
             # Recommendation
             lines.append("  Recommendation:")

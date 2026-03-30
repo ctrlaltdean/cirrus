@@ -2025,6 +2025,127 @@ def _render_blast_radius_report(report: "BlastRadiusReport") -> None:
 
 
 # ---------------------------------------------------------------------------
+# Hunt command
+# ---------------------------------------------------------------------------
+
+@app.command("hunt")
+def hunt(
+    tenant: TenantOpt = None,
+    days: Annotated[int, typer.Option("--days", help="How many days back to scan (default 30).")] = 30,
+) -> None:
+    """
+    Perform a proactive tenant-wide threat hunt without a known starting account.
+
+    Scans all sign-in logs, directory roles, and OAuth consent grants to surface:
+      - Accounts with suspicious auth patterns (device code, impossible travel,
+        legacy auth, high Identity Protection risk)
+      - Recently created accounts that hold a privileged directory role
+      - OAuth apps with high-risk scopes consented by multiple users
+      - IP addresses performing password spray attacks
+
+    Results display in the terminal ranked by signal count. No case folder
+    is created — use this for initial discovery before running a full workflow.
+
+    \\b
+    Examples:
+        cirrus hunt --tenant contoso.com
+        cirrus hunt --tenant contoso.com --days 14
+    """
+    _banner()
+
+    if tenant is None:
+        tenant = _prompt_tenant()
+
+    token, username = _authenticate(tenant)
+
+    console.print(
+        f"\n[bold]Tenant-wide threat hunt[/bold]  "
+        f"[dim]tenant: {tenant}  |  last {days} day(s)[/dim]\n"
+    )
+
+    from cirrus.analysis.hunt import run_hunt
+
+    with console.status("[dim]Running 4 hunt checks in parallel...[/dim]"):
+        report = run_hunt(token=token, days=days, tenant=tenant or "")
+
+    # ── Errors ──────────────────────────────────────────────────────────────
+    if report.errors:
+        for err in report.errors:
+            console.print(f"  [yellow]⚠[/yellow]  [dim]{err}[/dim]")
+        console.print()
+
+    # ── No findings ─────────────────────────────────────────────────────────
+    if not report.targets:
+        console.print(
+            Panel(
+                "[bold green]No suspicious targets found.[/bold green]\n"
+                "[dim]All hunt checks returned clean for the specified window.[/dim]",
+                border_style="green",
+                expand=False,
+            )
+        )
+        return
+
+    # ── Results table ────────────────────────────────────────────────────────
+    SEV_STYLE = {"high": "red", "medium": "yellow", "low": "dim"}
+
+    table = Table(
+        title=f"Hunt Results — {len(report.targets)} suspicious target(s)",
+        border_style="bright_blue",
+        header_style="bold",
+        show_lines=True,
+    )
+    table.add_column("Severity", width=10, no_wrap=True)
+    table.add_column("Type", width=8)
+    table.add_column("Target", style="cyan", min_width=28)
+    table.add_column("Signals", width=8, justify="right")
+    table.add_column("Top Signal")
+
+    for t in report.targets:
+        sev = t.max_severity
+        style = SEV_STYLE.get(sev, "white")
+        top_signal = t.signals[0].detail if t.signals else ""
+        table.add_row(
+            f"[{style}]{sev.upper()}[/{style}]",
+            t.target_type,
+            t.name,
+            str(t.signal_count),
+            top_signal[:80],
+        )
+
+    console.print(table)
+
+    # ── Per-target detail ────────────────────────────────────────────────────
+    high_targets = report.high_targets
+    if high_targets:
+        console.print("\n[bold red]HIGH severity targets — all signals:[/bold red]")
+        for t in high_targets[:10]:
+            console.print(f"\n  [bold cyan]{t.name}[/bold cyan]  [dim]({t.target_type})[/dim]")
+            for s in t.signals:
+                sev_style = SEV_STYLE.get(s.severity, "white")
+                console.print(
+                    f"    [{sev_style}]→[/{sev_style}] [{s.check}] {s.detail}"
+                )
+
+    # ── Summary panel ────────────────────────────────────────────────────────
+    high_count   = len(report.high_targets)
+    medium_count = sum(1 for t in report.targets if t.max_severity == "medium")
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]Targets found:[/bold] {len(report.targets)}   "
+            f"[bold red]{high_count} HIGH[/bold red]   "
+            f"[bold yellow]{medium_count} MEDIUM[/bold yellow]   "
+            f"[dim]{report.total_signals} total signal(s)[/dim]\n\n"
+            "[dim]Next step: run [bold]cirrus triage[/bold] on suspicious accounts, "
+            "or [bold]cirrus run ato[/bold] to collect full evidence.[/dim]",
+            border_style="red" if high_count else "yellow",
+            expand=False,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 
 @app.command("analyze")
 def analyze(
