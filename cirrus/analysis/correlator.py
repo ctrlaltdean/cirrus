@@ -57,6 +57,13 @@ Correlation rules (all findings include the supporting evidence records):
     A public IP address that appears in both sign-in logs and directory audit
     logs — suggests the same session or attacker source performed both auth
     and directory changes.
+
+  hosting_provider_signin             [MEDIUM]
+    A successful sign-in from an IP that ip_enrichment.json identifies as a
+    datacenter, hosting provider, proxy, or Tor exit node. Indicates the
+    account may have been accessed via anonymising infrastructure or an
+    attacker-controlled cloud VM. Only fires when ip_enrichment.json is
+    present (run `cirrus enrich` first).
 """
 
 from __future__ import annotations
@@ -244,6 +251,7 @@ class CorrelationEngine:
             self._rule_mass_mail_access,
             self._rule_new_account_with_signin,
             self._rule_cross_ip_correlation,
+            self._rule_hosting_provider_signin,
         ]
 
         for rule_fn in rules:
@@ -1116,6 +1124,117 @@ class CorrelationEngine:
                     "MFA method registration, role assignment, or app consent events that indicate "
                     "what the attacker did after authenticating."
                 ),
+            ))
+
+        return findings
+
+    def _rule_hosting_provider_signin(self) -> list[Finding]:
+        """
+        Successful sign-in from an IP that ip_enrichment.json identifies as
+        a datacenter, hosting provider, proxy, or Tor exit node.
+
+        Only runs when ip_enrichment.json exists in the case directory (i.e.
+        the analyst has already run `cirrus enrich`). Silently returns [] if
+        the file is absent or contains no threat data.
+        """
+        enrichment_path = self.case_dir / "ip_enrichment.json"
+        if not enrichment_path.exists():
+            return []
+
+        try:
+            with enrichment_path.open(encoding="utf-8") as fh:
+                enrichment = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            return []
+
+        ips_data: dict[str, dict] = enrichment.get("ips") or {}
+        if not ips_data:
+            return []
+
+        # Build set of suspicious IPs from enrichment data
+        suspicious_ips: dict[str, list[str]] = {}  # ip -> threat tags
+        for ip, data in ips_data.items():
+            tags = data.get("threat_summary") or []
+            abuse_score = data.get("abuse_score")
+            if isinstance(abuse_score, int) and abuse_score >= 25:
+                if f"ABUSE_SCORE:{abuse_score}" not in tags:
+                    tags = list(tags) + [f"ABUSE_SCORE:{abuse_score}"]
+            if tags:
+                suspicious_ips[ip] = tags
+
+        if not suspicious_ips:
+            return []
+
+        signin_records = self._d("signin_logs")
+        if not signin_records:
+            return []
+
+        # Find successful sign-ins from suspicious IPs, grouped by user
+        by_user: dict[str, list[tuple[dict, list[str]]]] = defaultdict(list)
+        for r in signin_records:
+            ip = r.get("ipAddress") or ""
+            if ip not in suspicious_ips:
+                continue
+            status = r.get("status") or {}
+            if (status.get("errorCode") or 0) != 0:
+                continue  # failed sign-in — not as urgent
+            upn = (r.get("userPrincipalName") or "").lower()
+            if upn:
+                by_user[upn].append((r, suspicious_ips[ip]))
+
+        findings: list[Finding] = []
+        for upn, hits in by_user.items():
+            # Deduplicate IPs for this user
+            unique_ips: dict[str, list[str]] = {}
+            for r, tags in hits:
+                ip = r.get("ipAddress") or ""
+                if ip and ip not in unique_ips:
+                    unique_ips[ip] = tags
+
+            ioc_flags = [f"HOSTING_PROVIDER_SIGNIN:{ip}" for ip in unique_ips]
+
+            evidence: list[Evidence] = []
+            for r, tags in hits[:4]:
+                ip = r.get("ipAddress") or ""
+                country = (r.get("location") or {}).get("countryOrRegion", "")
+                tag_str = ", ".join(tags[:3])
+                evidence.append(_evidence(
+                    r, "signin_logs", "createdDateTime",
+                    f"Sign-in from {ip} ({country}) — {tag_str}",
+                ))
+
+            ip_list = ", ".join(list(unique_ips.keys())[:4])
+            all_tags: list[str] = []
+            for tags in unique_ips.values():
+                all_tags.extend(t for t in tags if t not in all_tags)
+            tag_summary = ", ".join(all_tags[:5])
+
+            findings.append(Finding(
+                id="",
+                rule="hosting_provider_signin",
+                severity="medium",
+                title=(
+                    f"Successful sign-in from hosting/anonymising infrastructure — {upn}"
+                ),
+                user=upn,
+                description=(
+                    f"{upn} had a successful sign-in from "
+                    f"{'an IP' if len(unique_ips) == 1 else f'{len(unique_ips)} IPs'} "
+                    f"({ip_list}) identified as {tag_summary}. "
+                    "Attackers commonly use datacenter VMs, commercial VPNs, or Tor to "
+                    "anonymise their origin during account takeover operations. "
+                    "Legitimate users rarely authenticate from hosting infrastructure."
+                ),
+                evidence=evidence,
+                recommendation=(
+                    "Review the full sign-in context (app used, MFA method, device) for "
+                    f"the sign-in(s) from {ip_list}. "
+                    "Run `cirrus triage` on this account to assess broader compromise indicators. "
+                    "If the sign-in is not recognised by the user, revoke all sessions "
+                    "(revokeSignInSessions), reset credentials, and check for new MFA "
+                    "methods or inbox rules added after this sign-in."
+                ),
+                ioc_flags=ioc_flags,
             ))
 
         return findings

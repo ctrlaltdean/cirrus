@@ -28,6 +28,8 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 - [Commands](#commands)
   - [Authentication](#authentication)
   - [Quick Triage](#quick-triage)
+  - [IP Enrichment](#ip-enrichment)
+  - [Blast Radius](#blast-radius)
   - [Investigation Workflows](#investigation-workflows)
     - [BEC — Business Email Compromise](#bec--business-email-compromise)
     - [ATO — Account Takeover](#ato--account-takeover)
@@ -55,12 +57,14 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 | Feature | Description |
 |---|---|
 | **Quick Triage** | 8 parallel checks on a suspected compromised account — results in seconds, no case folder needed |
+| **IP Enrichment** | Enrich all IPs in a case with geolocation, ASN, and threat intel (datacenter/proxy/Tor/VPN). Free via ip-api.com; optional AbuseIPDB abuse scoring |
+| **Blast Radius** | Map a compromised account's full access footprint — directory roles, groups, app roles, owned objects, OAuth grants, and recent sign-in apps — in parallel |
 | **BEC Workflow** | Targeted 10-step collection for Business Email Compromise investigations |
 | **ATO Workflow** | 11-step Account Takeover investigation — authentication layer, persistence, and exfiltration |
 | **BEC+ATO Workflow** | Combined 13-step full attack chain — most BEC incidents begin with an ATO event |
 | **Full Tenant Sweep** | Complete collection across all supported data sources |
-| **Cross-Collector Correlation** | Post-collection engine links events across collectors to surface multi-source attack patterns |
-| **HTML Investigation Report** | Single self-contained HTML report with correlation findings, IOC timeline, and per-collector tables |
+| **Cross-Collector Correlation** | Post-collection engine links events across collectors to surface multi-source attack patterns including hosting-provider sign-ins |
+| **HTML Investigation Report** | Single self-contained HTML report with correlation findings, IOC timeline, IP enrichment tab, and per-collector tables |
 | **CIS Compliance Audit** | 34 checks against CIS M365 & Entra ID Benchmarks with wizard UI |
 | **License-Aware Collection** | Detects tenant license tier (P1/P2/E5) and gracefully skips unsupported endpoints |
 | **Multi-Tenant** | Authenticate to and collect from multiple client tenants independently |
@@ -362,6 +366,116 @@ cirrus triage
 
 ---
 
+### IP Enrichment
+
+Enriches every public IP address found in a collected case with geolocation, ASN, hosting/proxy/Tor indicators, and optionally AbuseIPDB abuse scores. Writes `ip_enrichment.json` to the case folder without modifying any collector files.
+
+> **Why opt-in?** Enrichment makes external network calls to third-party services. Running it automatically during every workflow would add latency and make offline-only collection impossible. Run it explicitly once collection is complete.
+
+**Data sources:**
+
+| Source | Key required? | What it provides |
+|--------|--------------|-----------------|
+| [ip-api.com](https://ip-api.com) | No | Country, city, ASN, org/ISP, datacenter flag, proxy flag, Tor exit flag |
+| [AbuseIPDB](https://www.abuseipdb.com) | Yes (free) | Abuse confidence score (0–100), total abuse reports |
+
+**AbuseIPDB setup (one-time):**
+1. Register for a free account at [abuseipdb.com/register](https://www.abuseipdb.com/register)
+2. Generate an API key from your dashboard
+3. Set it in your shell: `export ABUSEIPDB_KEY=your_key_here`
+
+```bash
+# Enrich IPs in a case folder — ip-api.com only (no key needed)
+cirrus enrich investigations/CONTOSO_20260317_143022
+
+# With AbuseIPDB abuse scores
+cirrus enrich investigations/CONTOSO_20260317_143022 --abuseipdb-key YOUR_KEY
+
+# Using the environment variable (recommended — set once in your shell profile)
+export ABUSEIPDB_KEY=your_key_here
+cirrus enrich investigations/CONTOSO_20260317_143022
+```
+
+**Sample output:**
+```
+                    IP Enrichment — 6 address(es)
+┌─────────────────┬─────────┬──────────────┬────────────────────────────┬────────────────────┬────────┐
+│ IP Address      │ Country │ City         │ ASN / Org                  │ Flags              │ Abuse% │
+├─────────────────┼─────────┼──────────────┼────────────────────────────┼────────────────────┼────────┤
+│ 185.220.101.42  │ DE      │ Frankfurt    │ AS4224 Tor Project         │ TOR_EXIT_NODE      │ 100    │
+│ 45.142.212.100  │ NL      │ Amsterdam    │ AS209588 Serverius         │ DATACENTER/HOSTING │ 82     │
+│ 104.26.12.55    │ US      │ San Jose     │ AS13335 Cloudflare         │ —                  │ 0      │
+│ 8.8.8.8         │ US      │ Ashburn      │ AS15169 Google LLC         │ DATACENTER/HOSTING │ 0      │
+│ 198.51.100.5    │ GB      │ London       │ AS12345 Some VPN Ltd       │ PROXY/VPN          │ 45     │
+│ 2.56.188.21     │ RU      │ Moscow       │ AS57523 Chang Way Tech     │ —                  │ 12     │
+└─────────────────┴─────────┴──────────────┴────────────────────────────┴────────────────────┴────────┘
+
+Total: 6 IP(s)  3 suspicious
+Output: investigations/CONTOSO_20260317_143022/ip_enrichment.json
+```
+
+Once `ip_enrichment.json` exists, re-running `cirrus analyze` will automatically include:
+- An **IP Enrichment tab** in `investigation_report.html` with the full enrichment table
+- A new `hosting_provider_signin` correlation finding for any successful sign-in from a datacenter, proxy, or Tor IP
+
+---
+
+### Blast Radius
+
+Maps the full access footprint of a potentially compromised account by querying Microsoft Graph for all access dimensions in parallel. No case folder is required — results display in the terminal immediately. Use this early in an investigation to understand what an attacker could reach if the account is compromised.
+
+**Access dimensions checked (all run simultaneously):**
+
+| Dimension | What it looks for |
+|---|---|
+| Directory roles | Entra ID directory roles assigned — flags Global Administrator and other admin roles as HIGH |
+| Group memberships | Group memberships — flags role-assignable groups as HIGH |
+| App role assignments | Application permissions granted to the user — flags high-impact permissions (Mail.ReadWrite, Files.ReadWrite.All, etc.) |
+| Owned objects | Objects owned by this account — flags owned app registrations (an attacker can add credentials to these) |
+| OAuth grants | Delegated permission grants — flags high-risk scopes |
+| Recent sign-in apps | Applications this account has authenticated to recently |
+
+```bash
+# Assess a single account
+cirrus blast-radius --tenant contoso.com --user john@contoso.com
+
+# Save results to an existing case folder
+cirrus blast-radius --tenant contoso.com --user john@contoso.com \
+  --case-dir investigations/CONTOSO_20260317_143022
+
+# Multiple users from a file
+cirrus blast-radius --tenant contoso.com --users-file suspects.txt
+
+# Interactive wizard
+cirrus blast-radius
+```
+
+**Sample output:**
+```
+  ✗  Directory roles          HIGH    2 role(s) — 2 HIGH-PRIVILEGE
+       → [HIGH] Global Administrator
+       → [HIGH] Exchange Administrator
+  ✓  Group memberships        CLEAN   3 group(s)
+  ✗  App role assignments     HIGH    1 app role(s) — 1 high-impact
+       → [HIGH] Microsoft Graph — Mail.ReadWrite.All
+  ⚠  Owned objects            WARN    2 object(s): 1× application, 1× group
+       → [HIGH] App registration: Contoso Reporting App
+  ✗  OAuth grants (delegated) HIGH    3 grant(s) — 2 with high-risk scopes
+       → [HIGH] App d1e3f2a… — scopes: Mail.ReadWrite, Files.ReadWrite.All
+  ⚠  Recent sign-in apps      WARN    12 sign-in(s) · 7 distinct app(s)
+
+╭─ User: john@contoso.com   Risk: HIGH RISK   4/5 dimensions flagged ──────────────────╮
+│  High-privilege indicators:                                                           │
+│    → HIGH_PRIV_ROLE:Global Administrator                                              │
+│    → HIGH_PRIV_ROLE:Exchange Administrator                                            │
+│    → HIGH_APP_ROLE:Microsoft Graph:Mail.ReadWrite.All                                 │
+╰───────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+If `--case-dir` is provided, results are written to `blast_radius.json` in that folder.
+
+---
+
 ### Investigation Workflows
 
 All workflow runs produce a timestamped case folder with JSON, CSV, and NDJSON output per collector, a chain-of-custody audit log, cross-collector correlation findings, and a self-contained HTML investigation report.
@@ -538,6 +652,19 @@ It writes:
 - `investigation_report.html` — full self-contained HTML investigation report
 
 See [Cross-Collector Correlation](#cross-collector-correlation) for the full list of detection rules.
+
+**Optional enrichment step:** After collection, run `cirrus enrich` to annotate all IPs with geolocation, ASN, and threat intelligence. The enrichment results are folded into the HTML report as a dedicated tab and unlock the `hosting_provider_signin` correlation rule:
+
+```bash
+# Collect evidence
+cirrus run ato --tenant contoso.com --user john@contoso.com --days 30
+
+# Enrich IPs (run after collection)
+cirrus enrich investigations/CONTOSO_20260317_143022
+
+# Re-run analysis to pick up the new correlation rule and add the IP tab to the report
+cirrus analyze investigations/CONTOSO_20260317_143022
+```
 
 ---
 
@@ -887,13 +1014,16 @@ cirrus analyze investigations/CONTOSO_20260317_143022
 | `oauth_phishing_pattern` | **HIGH** | Device code / ROPC authentication + high-risk OAuth grant (mail read, file access) for the same user |
 | `bec_attack_pattern` | **HIGH** | Any sign-in activity + inbox rule with forwarding / deletion / hiding or external SMTP forwarding |
 | `device_code_then_device_registered` | **HIGH** | Device code phishing sign-in + new device registered — attacker obtains a PRT that survives password resets |
+| `password_spray` | **HIGH / MEDIUM** | Single IP with 10+ failures across 5+ accounts. Elevated to HIGH when the same IP also has a successful sign-in |
+| `mass_mail_access` | **HIGH / MEDIUM** | 50+ MailItemsAccessed UAL events for a single user. Elevated to HIGH when the user also has interactive sign-in activity |
 | `new_account_with_signin` | **MEDIUM** | Recently-created user account with active sign-in events — potential attacker backdoor account |
 | `cross_ip_correlation` | **MEDIUM** | Same public IP in both sign-in logs and directory audit logs — same session performed auth and directory changes |
+| `hosting_provider_signin` | **MEDIUM** | Successful sign-in from an IP identified as a datacenter, hosting provider, proxy, or Tor exit node. Requires `ip_enrichment.json` (run `cirrus enrich` first) |
 
 Three output files are written to the case folder:
 - `ioc_correlation.json` — machine-readable findings (suitable for SIEM ingestion)
 - `ioc_correlation.txt` — formatted report for analyst review and case documentation
-- `investigation_report.html` — self-contained HTML report with correlation findings, IOC timeline, per-user summary, and per-collector flagged record tables
+- `investigation_report.html` — self-contained HTML report with correlation findings, IOC timeline, per-user summary, per-collector flagged record tables, and optional IP enrichment tab
 
 ---
 
@@ -935,11 +1065,13 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 ## Roadmap
 
 - [ ] App registration / service principal auth (`--client-id` / `--client-secret`) for unattended/automated collection
-- [x] Additional correlation rules: password spray detection, mass mail access / exfiltration indicators
 - [ ] SIEM push integrations (Splunk HEC, Microsoft Sentinel)
+- [x] IP enrichment (`cirrus enrich`) — geo/ASN/hosting/proxy/Tor via ip-api.com + optional AbuseIPDB abuse scoring
+- [x] Blast radius assessment (`cirrus blast-radius`) — 6 parallel Graph API checks mapping account access footprint
+- [x] Additional correlation rules: password spray, mass mail access, hosting-provider sign-in (11 rules total)
 - [x] Quick triage command (`cirrus triage`) — 8 parallel checks, results in seconds
-- [x] HTML investigation report (`investigation_report.html`) — self-contained, print-friendly, offline-capable
-- [x] Cross-collector correlation engine (8 rules, auto-runs after every workflow)
+- [x] HTML investigation report (`investigation_report.html`) — self-contained, print-friendly, offline-capable, with IP enrichment tab
+- [x] Cross-collector correlation engine (auto-runs after every workflow)
 - [x] Account Takeover (ATO) investigation workflow
 - [x] BEC+ATO combined full attack chain workflow
 - [x] Registered devices and app registrations collectors

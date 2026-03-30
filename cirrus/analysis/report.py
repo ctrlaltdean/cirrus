@@ -213,6 +213,16 @@ def _load_correlation(case_dir: Path) -> dict[str, Any]:
     return {"summary": {}, "findings": [], "collectors_loaded": []}
 
 
+def _load_enrichment(case_dir: Path) -> dict[str, Any]:
+    path = case_dir / "ip_enrichment.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
 def _audit_target_users(record: dict) -> list[str]:
     upns: list[str] = []
     for res in record.get("targetResources") or []:
@@ -650,10 +660,17 @@ def _collector_stat_cards(stats: dict) -> str:
     return "\n".join(parts)
 
 
-def _html_tab_nav(data: dict, corr: dict, timeline: list) -> str:
+def _html_tab_nav(data: dict, corr: dict, timeline: list, enrichment: dict | None = None) -> str:
     tabs = [("correlation", f"Correlation ({len(corr.get('findings') or [])})"),
             ("timeline",    f"Timeline ({len(timeline)})"),
             ("users",       "Users")]
+    if enrichment and enrichment.get("total_ips", 0) > 0:
+        suspicious = enrichment.get("suspicious_count", 0)
+        label = f"IP Enrichment ({enrichment['total_ips']} IPs"
+        if suspicious:
+            label += f", {suspicious}⚠"
+        label += ")"
+        tabs.append(("ip_enrichment", label))
     for key in _COLLECTOR_CONFIG:
         if data.get(key):
             cfg = _COLLECTOR_CONFIG[key]
@@ -849,6 +866,91 @@ def _html_collector_tab(key: str, records: list[dict]) -> str:
     )
 
 
+def _html_enrichment_tab(enrichment: dict) -> str:
+    ips_dict: dict[str, dict] = enrichment.get("ips") or {}
+    total = enrichment.get("total_ips", 0)
+    suspicious = enrichment.get("suspicious_count", 0)
+    abuseipdb_used = enrichment.get("abuseipdb_used", False)
+
+    if not ips_dict:
+        return (
+            '<div class="tab-content" id="ip_enrichment">'
+            '<div class="section-title">IP Enrichment</div>'
+            '<p class="no-data">No IP enrichment data found.</p>'
+            '</div>'
+        )
+
+    abuse_col = "<th>Abuse%</th>" if abuseipdb_used else ""
+    rows: list[str] = []
+    for ip in sorted(ips_dict.keys()):
+        data = ips_dict[ip]
+        threat_tags = data.get("threat_summary") or []
+        is_susp = bool(threat_tags)
+
+        country = _e(data.get("country_code") or "—")
+        city = _e((data.get("city") or "—")[:24])
+        asn = _e(data.get("asn") or "")
+        org = _e((data.get("org") or data.get("isp") or "")[:40])
+        asn_org = f"{asn} {org}".strip() if asn else org
+
+        if threat_tags:
+            tags_html = " ".join(
+                f'<span class="flag-badge" style="background:#ef444420;color:#ef4444;border:1px solid #ef444440">'
+                f'{_e(t)}</span>'
+                for t in threat_tags
+            )
+        else:
+            tags_html = '<span style="color:var(--muted);font-size:11px">none</span>'
+
+        ip_style = "color:#ef4444;font-weight:600" if is_susp else ""
+        row_class = "flagged-row" if is_susp else ""
+
+        abuse_cell = ""
+        if abuseipdb_used:
+            score = data.get("abuse_score")
+            if score is None:
+                abuse_cell = "<td>—</td>"
+            elif int(score) >= 25:
+                abuse_cell = f'<td style="color:#ef4444;font-weight:600">{_e(score)}</td>'
+            else:
+                abuse_cell = f"<td>{_e(score)}</td>"
+
+        rows.append(
+            f'<tr class="{row_class}">'
+            f'<td style="font-family:monospace;{ip_style}">{_e(ip)}</td>'
+            f'<td>{country}</td>'
+            f'<td>{city}</td>'
+            f'<td style="font-family:monospace;font-size:11px" title="{asn_org}">{asn_org[:44]}</td>'
+            f'<td class="flags-cell">{tags_html}</td>'
+            f'{abuse_cell}'
+            f'</tr>'
+        )
+
+    abuseipdb_note = (
+        '<p style="font-size:12px;color:var(--muted);margin-top:8px">'
+        'AbuseIPDB data included. Abuse% = confidence score (0–100) that the IP is malicious. '
+        'Scores ≥ 25 are highlighted.</p>'
+        if abuseipdb_used else
+        '<p style="font-size:12px;color:var(--muted);margin-top:8px">'
+        'AbuseIPDB enrichment not run. Re-run '
+        '<code>cirrus enrich --abuseipdb-key &lt;key&gt;</code> to add abuse scores. '
+        'Register free at <a href="https://www.abuseipdb.com/register" target="_blank">'
+        'abuseipdb.com/register</a>.</p>'
+    )
+
+    return (
+        f'<div class="tab-content" id="ip_enrichment">'
+        f'<div class="section-title">IP Enrichment — {total} address(es), {suspicious} suspicious</div>'
+        f'<table class="data-table">'
+        f'<thead><tr><th>IP Address</th><th>Country</th><th>City</th>'
+        f'<th>ASN / Org</th><th>Threat Tags</th>{abuse_col}</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody>'
+        f'</table>'
+        f'{abuseipdb_note}'
+        f'</div>'
+    )
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def generate_report(case_dir: Path) -> Path:
@@ -860,16 +962,19 @@ def generate_report(case_dir: Path) -> Path:
     meta["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     data = _load_data(case_dir)
     corr = _load_correlation(case_dir)
+    enrichment = _load_enrichment(case_dir)
     stats = _build_stats(data)
     timeline = _build_timeline(data)
     user_summary = _build_user_summary(data)
 
-    # Tab content: correlation, timeline, users, then one tab per collector
+    # Tab content: correlation, timeline, users, optional enrichment, then one tab per collector
     tab_contents: list[str] = [
         _html_correlation_tab(corr),
         _html_timeline_tab(timeline),
         _html_users_tab(user_summary),
     ]
+    if enrichment and enrichment.get("total_ips", 0) > 0:
+        tab_contents.append(_html_enrichment_tab(enrichment))
     for key, records in data.items():
         if records:
             tab_contents.append(_html_collector_tab(key, records))
@@ -885,7 +990,7 @@ def generate_report(case_dir: Path) -> Path:
         "</head>",
         "<body>",
         _html_header(meta, stats, corr),
-        _html_tab_nav(data, corr, timeline),
+        _html_tab_nav(data, corr, timeline, enrichment),
         *tab_contents,
         f'<div class="report-footer">Generated by CIRRUS &nbsp;·&nbsp; {_e(meta["generated_at"])}'
         f' &nbsp;·&nbsp; Case: {_e(meta["case_name"])}</div>',

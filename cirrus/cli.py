@@ -13,6 +13,8 @@ Commands:
     cirrus run bec-ato    — run combined BEC+ATO full attack chain workflow
 
     cirrus triage         — quick targeted checks on a suspected compromised account
+    cirrus enrich         — enrich IPs from an existing case with geo/ASN/threat data
+    cirrus blast-radius   — map access dimensions of a potentially compromised account
     cirrus analyze        — re-run cross-collector correlation on an existing case
     cirrus case verify    — verify chain-of-custody integrity for a case folder
 
@@ -1722,6 +1724,301 @@ def _render_triage_report(report: "TriageReport") -> None:
                 if verdict in ("high", "warn") else ""
             ),
             border_style="red" if verdict == "high" else ("yellow" if verdict == "warn" else "green"),
+            expand=False,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Enrich command
+# ---------------------------------------------------------------------------
+
+@app.command("enrich")
+def enrich(
+    case_dir: Annotated[Path, typer.Argument(help="Path to the case folder to enrich.")],
+    abuseipdb_key: Annotated[Optional[str], typer.Option(
+        "--abuseipdb-key",
+        envvar="ABUSEIPDB_KEY",
+        help=(
+            "AbuseIPDB API key for threat intelligence enrichment (optional). "
+            "Register free at https://www.abuseipdb.com/register — free tier: "
+            "1,000 requests/day. Set once in your shell: export ABUSEIPDB_KEY=<key>"
+        ),
+    )] = None,
+) -> None:
+    """
+    Enrich IP addresses from a collected case with geo, ASN, and threat data.
+
+    Reads all collector JSON files in the case folder, extracts public IP
+    addresses, and queries ip-api.com for geolocation/ASN/datacenter/proxy/Tor
+    information. Optionally queries AbuseIPDB for abuse confidence scores.
+
+    Writes ip_enrichment.json to the case folder. Does NOT modify any
+    collector output files.
+
+    \\b
+    IP data sources:
+        ip-api.com   — free, no key required, batch geo/ASN/hosting/proxy/tor
+        AbuseIPDB    — optional, requires free API key (see --abuseipdb-key)
+                       Register: https://www.abuseipdb.com/register
+                       Docs:     https://docs.abuseipdb.com/
+
+    \\b
+    Examples:
+        cirrus enrich ./investigations/CONTOSO_20260101_120000
+        cirrus enrich ./investigations/CONTOSO_20260101_120000 --abuseipdb-key abc123
+        ABUSEIPDB_KEY=abc123 cirrus enrich ./investigations/CONTOSO_20260101_120000
+    """
+    _banner()
+
+    if not case_dir.exists() or not case_dir.is_dir():
+        console.print(f"[red]Case folder not found:[/red] {case_dir}")
+        raise typer.Exit(1)
+
+    if abuseipdb_key:
+        console.print(
+            f"\n[bold]Enriching IPs[/bold] in [cyan]{case_dir}[/cyan] "
+            f"[dim](ip-api.com + AbuseIPDB)[/dim]\n"
+        )
+    else:
+        console.print(
+            f"\n[bold]Enriching IPs[/bold] in [cyan]{case_dir}[/cyan] "
+            f"[dim](ip-api.com only — use --abuseipdb-key for threat scores)[/dim]\n"
+        )
+
+    from cirrus.analysis.ip_enrichment import run_enrichment
+
+    progress_msgs: list[str] = []
+
+    def _on_progress(msg: str) -> None:
+        progress_msgs.append(msg)
+
+    with console.status("[dim]Querying enrichment APIs...[/dim]"):
+        result = run_enrichment(case_dir, abuseipdb_key=abuseipdb_key, on_progress=_on_progress)
+
+    total = result.get("total_ips", 0)
+    suspicious = result.get("suspicious_count", 0)
+    ips_dict = result.get("ips") or {}
+
+    if total == 0:
+        console.print("[yellow]No public IP addresses found in case files.[/yellow]")
+        return
+
+    # Build display table
+    table = Table(
+        title=f"IP Enrichment — {total} address(es)",
+        border_style="bright_blue",
+        header_style="bold",
+    )
+    table.add_column("IP Address", style="cyan", no_wrap=True)
+    table.add_column("Country", width=12)
+    table.add_column("City", width=16)
+    table.add_column("ASN / Org")
+    table.add_column("Flags", style="yellow")
+    if abuseipdb_key:
+        table.add_column("Abuse%", width=8)
+
+    for ip, data in sorted(ips_dict.items()):
+        threat = ", ".join(data.get("threat_summary") or [])
+        flag_style = "red" if threat else ""
+        asn_org = data.get("asn") or ""
+        org = data.get("org") or data.get("isp") or ""
+        if org and asn_org:
+            asn_org = f"{asn_org} {org}"
+        elif org:
+            asn_org = org
+
+        row = [
+            f"[{'red' if threat else 'cyan'}]{ip}[/{'red' if threat else 'cyan'}]",
+            data.get("country_code") or "—",
+            (data.get("city") or "—")[:16],
+            (asn_org or "—")[:40],
+            threat or "—",
+        ]
+        if abuseipdb_key:
+            score = data.get("abuse_score")
+            score_str = str(score) if score is not None else "—"
+            if isinstance(score, int) and score >= 25:
+                score_str = f"[red]{score_str}[/red]"
+            row.append(score_str)
+
+        table.add_row(*row)
+
+    console.print(table)
+    console.print(
+        f"\n[bold]Total:[/bold] {total} IP(s)  "
+        f"[{'red' if suspicious else 'green'}]{suspicious} suspicious[/{'red' if suspicious else 'green'}]\n"
+        f"[bold]Output:[/bold] [cyan]{case_dir / 'ip_enrichment.json'}[/cyan]\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Blast-radius command
+# ---------------------------------------------------------------------------
+
+@app.command("blast-radius")
+def blast_radius(
+    tenant: TenantOpt = None,
+    user:   Annotated[Optional[str], typer.Option("--user",  help="UPN of the account to assess.")] = None,
+    users:  Annotated[Optional[list[str]], typer.Option("--users", help="Multiple UPNs (repeat flag).")] = None,
+    users_file: Annotated[Optional[Path], typer.Option("--users-file", help="File with one UPN per line.")] = None,
+    case_dir: Annotated[Optional[Path], typer.Option("--case-dir", help="Save blast_radius.json to this case folder.")] = None,
+) -> None:
+    """
+    Map the access dimensions of a potentially compromised account.
+
+    Queries Microsoft Graph in parallel for all access dimensions associated
+    with the account: directory roles, group memberships, app role assignments,
+    owned objects (including app registrations), OAuth grants, and recent
+    sign-in applications.
+
+    Results display immediately in the terminal. If --case-dir is provided,
+    blast_radius.json is also written to the case folder.
+
+    \\b
+    Examples:
+        cirrus blast-radius --tenant contoso.com --user john@contoso.com
+        cirrus blast-radius --tenant contoso.com --user john@contoso.com --case-dir ./investigations/CONTOSO_...
+        cirrus blast-radius --tenant contoso.com --users-file suspects.txt
+    """
+    from rich.panel import Panel as RichPanel
+
+    _banner()
+
+    if tenant is None:
+        tenant = _prompt_tenant()
+
+    token, username = _authenticate(tenant)
+
+    # ── Resolve user list ──────────────────────────────────────────────────
+    target_users: list[str] = []
+    if user:
+        err = _validate_upn(user)
+        if err:
+            console.print(f"[red]Invalid UPN:[/red] {err}")
+            raise typer.Exit(1)
+        target_users.append(user)
+    if users:
+        for u in users:
+            err = _validate_upn(u)
+            if err:
+                console.print(f"[red]Invalid UPN:[/red] {err}")
+                raise typer.Exit(1)
+            target_users.append(u)
+    if users_file:
+        if not users_file.exists():
+            console.print(f"[red]File not found:[/red] {users_file}")
+            raise typer.Exit(1)
+        for line in users_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                err = _validate_upn(line)
+                if err:
+                    console.print(f"[yellow]Warning — skipping invalid UPN:[/yellow] {err}")
+                    continue
+                target_users.append(line)
+
+    if not target_users:
+        while True:
+            upn = Prompt.ask(
+                "\n[bold]Target user[/bold] [dim](account UPN, e.g. john@contoso.com)[/dim]"
+            ).strip()
+            err = _validate_upn(upn)
+            if err:
+                console.print(f"[red]Invalid UPN:[/red] {err}")
+            else:
+                target_users = [upn]
+                break
+
+    target_users = list(dict.fromkeys(target_users))
+
+    # ── Run blast-radius for each user ─────────────────────────────────────
+    from cirrus.analysis.blast_radius import run_blast_radius
+
+    for upn in target_users:
+        console.print(f"\n[bold]Blast-radius assessment:[/bold]  {upn}\n")
+
+        with console.status("[dim]Running 6 checks in parallel...[/dim]"):
+            report = run_blast_radius(
+                token=token, upn=upn, tenant=tenant or "", case_dir=case_dir
+            )
+
+        _render_blast_radius_report(report)
+
+        if case_dir:
+            console.print(
+                f"[dim]Written:[/dim] [cyan]{case_dir / 'blast_radius.json'}[/cyan]\n"
+            )
+
+        if len(target_users) > 1:
+            console.print()
+
+
+def _render_blast_radius_report(report: "BlastRadiusReport") -> None:
+    """Render a blast-radius report to the terminal using Rich."""
+    STATUS_ICON  = {"high": "[red]✗[/red]",   "warn": "[yellow]⚠[/yellow]",
+                    "clean": "[green]✓[/green]", "error": "[dim]![/dim]",
+                    "skipped": "[dim]–[/dim]"}
+    STATUS_LABEL = {"high": "[red]HIGH[/red]",   "warn": "[yellow]WARN[/yellow]",
+                    "clean": "[green]CLEAN[/green]", "error": "[dim]ERROR[/dim]",
+                    "skipped": "[dim]SKIP[/dim]"}
+
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        border_style="bright_blue",
+        show_lines=False,
+        box=None,
+        pad_edge=True,
+    )
+    table.add_column("", width=3, no_wrap=True)
+    table.add_column("Dimension", style="bold", min_width=24, no_wrap=True)
+    table.add_column("Status", width=10, no_wrap=True)
+    table.add_column("Summary")
+
+    for dim in report.dimensions:
+        icon  = STATUS_ICON.get(dim.status, "?")
+        label = STATUS_LABEL.get(dim.status, dim.status)
+        table.add_row(icon, dim.label, label, dim.summary)
+
+    console.print(table)
+
+    # Detail bullets for flagged dimensions
+    for dim in report.dimensions:
+        if dim.detail and dim.status in ("high", "warn"):
+            console.print(f"\n  [bold]{dim.label}[/bold]")
+            for line in dim.detail[:8]:
+                color = "red" if line.startswith("[HIGH]") else "yellow"
+                console.print(f"    [{color}]→[/{color}] {line}")
+
+    # Verdict panel
+    risk = report.risk_level
+    flagged = report.flagged_count
+    total   = len([d for d in report.dimensions if d.status != "skipped"])
+
+    console.print()
+    if risk == "high":
+        risk_str = "[bold red]HIGH RISK[/bold red]"
+    elif risk == "warn":
+        risk_str = "[bold yellow]ELEVATED ACCESS[/bold yellow]"
+    else:
+        risk_str = "[bold green]STANDARD ACCESS[/bold green]"
+
+    high_priv = report.high_privilege_summary
+    priv_note = ""
+    if high_priv:
+        priv_note = (
+            f"\n\n[dim]High-privilege indicators:[/dim]\n"
+            + "\n".join(f"  [red]→[/red] {f}" for f in high_priv[:6])
+        )
+
+    console.print(
+        Panel(
+            f"[bold]User:[/bold] {report.user}   "
+            f"[bold]Risk:[/bold] {risk_str}   "
+            f"[dim]{flagged}/{total} dimensions flagged[/dim]"
+            + priv_note,
+            border_style="red" if risk == "high" else ("yellow" if risk == "warn" else "green"),
             expand=False,
         )
     )
