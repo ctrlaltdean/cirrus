@@ -300,6 +300,7 @@ def write_case_files(case_dir: Path, **collector_data: list[dict]) -> None:
         "mailbox_rules":      "mailbox_rules.json",
         "mail_forwarding":    "mail_forwarding.json",
         "unified_audit_log":  "unified_audit_log.json",
+        "pim_activations":    "pim_activations.json",
     }
     case_dir.mkdir(parents=True, exist_ok=True)
     for key, records in collector_data.items():

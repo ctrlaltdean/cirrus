@@ -518,9 +518,87 @@ def _hunt_password_spray(
     return targets, None
 
 
+def _hunt_stale_accounts(
+    session: requests.Session,
+    stale_days: int = 90,
+) -> tuple[list[HuntTarget], str | None]:
+    """
+    Find enabled, licensed accounts with no sign-in activity in stale_days days.
+
+    These are prime targets for low-noise account takeover — they are still
+    valid, still licensed (so an attacker can access Exchange/SharePoint), but
+    nobody is monitoring them for anomalous activity.
+
+    Requires signInActivity on the user object (Entra ID P1 or higher) and
+    the AuditLog.Read.All permission. The endpoint will return null for
+    signInActivity if the tenant does not have P1.
+    """
+    try:
+        users = _collect_all(
+            session,
+            f"{GRAPH_BASE}/users",
+            params={
+                "$filter": "accountEnabled eq true",
+                "$select": (
+                    "id,userPrincipalName,displayName,assignedLicenses,"
+                    "signInActivity,createdDateTime"
+                ),
+                "$top": "999",
+            },
+        )
+    except PermissionError:
+        return [], "stale_accounts: Directory.Read.All required"
+    except Exception as exc:
+        return [], f"stale_accounts: {str(exc)[:120]}"
+
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
+    targets: list[HuntTarget] = []
+
+    for user in users:
+        upn = user.get("userPrincipalName") or ""
+        if not upn:
+            continue
+
+        # Skip unlicensed accounts — no cloud app access, lower risk
+        licenses = user.get("assignedLicenses") or []
+        if not licenses:
+            continue
+
+        sign_in_activity = user.get("signInActivity") or {}
+        last_signin_str = (
+            sign_in_activity.get("lastSignInDateTime") or
+            sign_in_activity.get("lastNonInteractiveSignInDateTime") or
+            ""
+        )
+
+        if last_signin_str:
+            last_signin = _parse_dt(last_signin_str)
+            if last_signin >= cutoff:
+                continue  # active account
+            days_inactive = (datetime.now(timezone.utc) - last_signin).days
+            detail = f"Last sign-in {days_inactive} days ago ({last_signin_str[:10]})"
+        else:
+            # signInActivity is null — either no sign-in ever or P1 not licensed
+            created_str = user.get("createdDateTime") or ""
+            created = _parse_dt(created_str)
+            if created >= cutoff:
+                continue  # newly created, no sign-in yet is expected
+            detail = "No sign-in activity recorded (possible never-used account or P1 not licensed)"
+
+        severity = "high" if not last_signin_str else "medium"
+        targets.append(HuntTarget(
+            name=upn,
+            target_type="user",
+            signals=[HuntSignal("stale_accounts", severity, detail)],
+        ))
+
+    return targets, None
+
+
 # ── Orchestrator ───────────────────────────────────────────────────────────────
 
-def run_hunt(token: str, days: int = 30, tenant: str = "") -> HuntReport:
+def run_hunt(token: str, days: int = 30, tenant: str = "", stale_days: int = 90) -> HuntReport:
     """
     Run all tenant-wide hunt checks in parallel and return a HuntReport.
 
@@ -553,6 +631,7 @@ def run_hunt(token: str, days: int = 30, tenant: str = "") -> HuntReport:
     # Checks that don't need start_dt
     static_checks: list[tuple[str, Callable]] = [
         ("oauth_risky_apps", lambda: _hunt_oauth_risky_apps(session)),
+        ("stale_accounts",   lambda: _hunt_stale_accounts(session, stale_days=stale_days)),
     ]
     all_checks = dt_checks + static_checks
 

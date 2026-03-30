@@ -144,6 +144,19 @@ _COLLECTOR_CONFIG: dict[str, dict] = {
             ("Deliver+Forward", "deliverToMailboxAndForward"),
         ],
     },
+    "pim_activations": {
+        "title": "PIM Activations",
+        "filename": "pim_activations.json",
+        "timestamp_key": "activityDateTime",
+        "user_key": "_targetUser",
+        "columns": [
+            ("Activity",    "activityDisplayName"),
+            ("Time (UTC)",  "activityDateTime"),
+            ("Initiated By","initiatedBy.user.userPrincipalName"),
+            ("Target",      "_targetUser"),
+            ("Result",      "result"),
+        ],
+    },
     "sp_signin_logs": {
         "title": "SP Sign-In Logs",
         "filename": "sp_signin_logs.json",
@@ -205,8 +218,8 @@ def _load_data(case_dir: Path) -> dict[str, list[dict]]:
         if path.exists():
             try:
                 records = json.loads(path.read_text(encoding="utf-8"))
-                # Synthesize _targetUser for audit records
-                if key == "audit_logs":
+                # Synthesize _targetUser for audit-style records
+                if key in ("audit_logs", "pim_activations"):
                     for r in records:
                         targets = _audit_target_users(r)
                         r["_targetUser"] = targets[0] if targets else ""
@@ -230,6 +243,16 @@ def _load_correlation(case_dir: Path) -> dict[str, Any]:
 
 def _load_enrichment(case_dir: Path) -> dict[str, Any]:
     path = case_dir / "ip_enrichment.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _load_domain_enrichment(case_dir: Path) -> dict[str, Any]:
+    path = case_dir / "domain_enrichment.json"
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -675,7 +698,7 @@ def _collector_stat_cards(stats: dict) -> str:
     return "\n".join(parts)
 
 
-def _html_tab_nav(data: dict, corr: dict, timeline: list, enrichment: dict | None = None) -> str:
+def _html_tab_nav(data: dict, corr: dict, timeline: list, enrichment: dict | None = None, domain_enrichment: dict | None = None) -> str:
     findings = corr.get("findings") or []
     tabs = [("correlation", f"Correlation ({len(findings)})"),
             ("timeline",    f"Timeline ({len(timeline)})"),
@@ -694,6 +717,13 @@ def _html_tab_nav(data: dict, corr: dict, timeline: list, enrichment: dict | Non
             label += f", {suspicious}⚠"
         label += ")"
         tabs.append(("ip_enrichment", label))
+    if domain_enrichment and domain_enrichment.get("total_domains", 0) > 0:
+        d_susp = domain_enrichment.get("suspicious_count", 0)
+        d_label = f"Domains ({domain_enrichment['total_domains']}"
+        if d_susp:
+            d_label += f", {d_susp}⚠"
+        d_label += ")"
+        tabs.append(("domain_enrichment", d_label))
     for key in _COLLECTOR_CONFIG:
         if data.get(key):
             cfg = _COLLECTOR_CONFIG[key]
@@ -1066,6 +1096,90 @@ def _html_remediation_tab(corr: dict) -> str:
     )
 
 
+def _html_domain_tab(domain_enrichment: dict) -> str:
+    """Render the domain enrichment tab in the HTML report."""
+    domains_dict: dict[str, dict] = domain_enrichment.get("domains") or {}
+    total = domain_enrichment.get("total_domains", 0)
+    suspicious = domain_enrichment.get("suspicious_count", 0)
+
+    if not domains_dict:
+        return (
+            '<div class="tab-content" id="domain_enrichment">'
+            '<div class="section-title">Domain Enrichment</div>'
+            '<p class="no-data">No external domains found in case files.</p>'
+            '</div>'
+        )
+
+    rows: list[str] = []
+    for domain in sorted(domains_dict.keys()):
+        data = domains_dict[domain]
+        tags = data.get("threat_summary") or []
+        is_susp = bool(tags)
+        age_days = data.get("age_days")
+
+        if age_days is None:
+            age_str = "—"
+            age_style = ""
+        elif age_days < 30:
+            age_str = f"{age_days}d"
+            age_style = "color:#ef4444;font-weight:600"
+        elif age_days < 90:
+            age_str = f"{age_days}d"
+            age_style = "color:#f97316;font-weight:600"
+        else:
+            age_str = f"{age_days}d"
+            age_style = ""
+
+        mx = data.get("mx_records") or []
+        mx_str = _e(mx[0][:36]) if mx else '<span style="color:var(--muted)">no MX</span>'
+        if data.get("routes_to_consumer_mail") and mx:
+            mx_str = f'<span style="color:#f97316;font-weight:600">{_e(mx[0][:36])}</span>'
+
+        spf = data.get("has_spf")
+        dmarc = data.get("has_dmarc")
+        spf_html = ('<span style="color:#22c55e">✓</span>' if spf else
+                    '<span style="color:#ef4444">✗</span>' if spf is False else "—")
+        dmarc_html = ('<span style="color:#22c55e">✓</span>' if dmarc else
+                      '<span style="color:#ef4444">✗</span>' if dmarc is False else "—")
+
+        if tags:
+            tags_html = " ".join(
+                f'<span class="flag-badge" style="background:#ef444420;color:#ef4444;border:1px solid #ef444440">'
+                f'{_e(t)}</span>'
+                for t in tags
+            )
+        else:
+            tags_html = '<span style="color:var(--muted);font-size:11px">clean</span>'
+
+        row_class = "flagged-row" if is_susp else ""
+        rows.append(
+            f'<tr class="{row_class}">'
+            f'<td style="font-family:monospace">{_e(domain)}</td>'
+            f'<td style="{age_style};text-align:right">{age_str}</td>'
+            f'<td>{_e((data.get("registrar") or "—")[:28])}</td>'
+            f'<td>{mx_str}</td>'
+            f'<td style="text-align:center">{spf_html}</td>'
+            f'<td style="text-align:center">{dmarc_html}</td>'
+            f'<td class="flags-cell">{tags_html}</td>'
+            f'</tr>'
+        )
+
+    return (
+        f'<div class="tab-content" id="domain_enrichment">'
+        f'<div class="section-title">Domain Enrichment — {total} domain(s), {suspicious} suspicious</div>'
+        f'<table class="data-table">'
+        f'<thead><tr><th>Domain</th><th>Age</th><th>Registrar</th>'
+        f'<th>MX (first)</th><th>SPF</th><th>DMARC</th><th>Threat Tags</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody>'
+        f'</table>'
+        f'<p style="font-size:12px;color:var(--muted);margin-top:8px">'
+        f'Age = days since domain registration via RDAP. '
+        f'Consumer MX = mail routes to Gmail/Outlook/ProtonMail etc. '
+        f'Run <code>cirrus enrich-domains</code> to refresh.</p>'
+        f'</div>'
+    )
+
+
 def _html_enrichment_tab(enrichment: dict) -> str:
     ips_dict: dict[str, dict] = enrichment.get("ips") or {}
     total = enrichment.get("total_ips", 0)
@@ -1080,7 +1194,9 @@ def _html_enrichment_tab(enrichment: dict) -> str:
             '</div>'
         )
 
+    vt_used = enrichment.get("vt_used", False)
     abuse_col = "<th>Abuse%</th>" if abuseipdb_used else ""
+    vt_col = "<th>VT Malicious</th>" if vt_used else ""
     rows: list[str] = []
     for ip in sorted(ips_dict.keys()):
         data = ips_dict[ip]
@@ -1115,6 +1231,17 @@ def _html_enrichment_tab(enrichment: dict) -> str:
             else:
                 abuse_cell = f"<td>{_e(score)}</td>"
 
+        vt_cell = ""
+        if vt_used:
+            vt_mal = data.get("vt_malicious")
+            if vt_mal is None:
+                vt_cell = "<td>—</td>"
+            elif int(vt_mal) > 0:
+                vt_susp = data.get("vt_suspicious") or 0
+                vt_cell = f'<td style="color:#ef4444;font-weight:600">{_e(vt_mal)} ({_e(vt_susp)}⚠)</td>'
+            else:
+                vt_cell = f"<td>0</td>"
+
         rows.append(
             f'<tr class="{row_class}">'
             f'<td style="font-family:monospace;{ip_style}">{_e(ip)}</td>'
@@ -1123,6 +1250,7 @@ def _html_enrichment_tab(enrichment: dict) -> str:
             f'<td style="font-family:monospace;font-size:11px" title="{asn_org}">{asn_org[:44]}</td>'
             f'<td class="flags-cell">{tags_html}</td>'
             f'{abuse_cell}'
+            f'{vt_cell}'
             f'</tr>'
         )
 
@@ -1143,7 +1271,7 @@ def _html_enrichment_tab(enrichment: dict) -> str:
         f'<div class="section-title">IP Enrichment — {total} address(es), {suspicious} suspicious</div>'
         f'<table class="data-table">'
         f'<thead><tr><th>IP Address</th><th>Country</th><th>City</th>'
-        f'<th>ASN / Org</th><th>Threat Tags</th>{abuse_col}</tr></thead>'
+        f'<th>ASN / Org</th><th>Threat Tags</th>{abuse_col}{vt_col}</tr></thead>'
         f'<tbody>{"".join(rows)}</tbody>'
         f'</table>'
         f'{abuseipdb_note}'
@@ -1163,12 +1291,13 @@ def generate_report(case_dir: Path) -> Path:
     data = _load_data(case_dir)
     corr = _load_correlation(case_dir)
     enrichment = _load_enrichment(case_dir)
+    domain_enrichment = _load_domain_enrichment(case_dir)
     stats = _build_stats(data)
     timeline = _build_timeline(data)
     user_summary = _build_user_summary(data)
 
     # Tab content: correlation, timeline, users, optional remediation, optional enrichment,
-    # then one tab per collector
+    # optional domain enrichment, then one tab per collector
     tab_contents: list[str] = [
         _html_correlation_tab(corr),
         _html_timeline_tab(timeline),
@@ -1178,6 +1307,8 @@ def generate_report(case_dir: Path) -> Path:
         tab_contents.append(_html_remediation_tab(corr))
     if enrichment and enrichment.get("total_ips", 0) > 0:
         tab_contents.append(_html_enrichment_tab(enrichment))
+    if domain_enrichment and domain_enrichment.get("total_domains", 0) > 0:
+        tab_contents.append(_html_domain_tab(domain_enrichment))
     for key, records in data.items():
         if records:
             tab_contents.append(_html_collector_tab(key, records))
@@ -1193,7 +1324,7 @@ def generate_report(case_dir: Path) -> Path:
         "</head>",
         "<body>",
         _html_header(meta, stats, corr),
-        _html_tab_nav(data, corr, timeline, enrichment),
+        _html_tab_nav(data, corr, timeline, enrichment, domain_enrichment),
         *tab_contents,
         f'<div class="report-footer">Generated by CIRRUS &nbsp;·&nbsp; {_e(meta["generated_at"])}'
         f' &nbsp;·&nbsp; Case: {_e(meta["case_name"])}</div>',

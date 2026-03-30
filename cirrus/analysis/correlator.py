@@ -87,6 +87,7 @@ _COLLECTOR_FILES = {
     "mail_forwarding":    "mail_forwarding.json",
     "unified_audit_log":  "unified_audit_log.json",
     "sp_signin_logs":     "sp_signin_logs.json",
+    "pim_activations":    "pim_activations.json",
 }
 
 # Minimum thresholds for spray / mass-access rules
@@ -177,6 +178,15 @@ _RULE_TECHNIQUES: dict[str, list[str]] = {
     "hosting_provider_signin": [
         "T1090 — Proxy",
         "T1078 — Valid Accounts",
+    ],
+    "pim_activation_after_suspicious_signin": [
+        "T1548 — Abuse Elevation Control Mechanism",
+        "T1078 — Valid Accounts",
+        "T1098.003 — Account Manipulation: Additional Cloud Roles",
+    ],
+    "ca_coverage_gap": [
+        "T1078 — Valid Accounts",
+        "T1562.001 — Impair Defenses: Disable or Modify Tools",
     ],
 }
 
@@ -304,6 +314,8 @@ class CorrelationEngine:
             self._rule_new_account_with_signin,
             self._rule_cross_ip_correlation,
             self._rule_hosting_provider_signin,
+            self._rule_pim_activation_after_suspicious_signin,
+            self._rule_ca_coverage_gap,
         ]
 
         for rule_fn in rules:
@@ -1288,6 +1300,188 @@ class CorrelationEngine:
                     "methods or inbox rules added after this sign-in."
                 ),
                 ioc_flags=ioc_flags,
+            ))
+
+        return findings
+
+    def _rule_pim_activation_after_suspicious_signin(self) -> list[Finding]:
+        """
+        A PIM high-privilege role activation for a user who also had a
+        suspicious sign-in (device code, impossible travel, geo-risk) in
+        the collection window.
+
+        Attackers who compromise an account eligible for a PIM role often
+        activate that role to perform admin actions immediately after sign-in.
+        The role may only be active for minutes before deactivation — this
+        correlation surfaces the pattern across the sign-in and PIM log streams.
+        """
+        pim_records = self._d("pim_activations")
+        signin_records = self._d("signin_logs")
+        if not pim_records or not signin_records:
+            return []
+
+        # Users with high-priv PIM activations
+        pim_by_user: dict[str, list[dict]] = defaultdict(list)
+        for r in pim_records:
+            if _has_flag_prefix(r, "HIGH_PRIV_PIM_ACTIVATION:"):
+                # Try to get the target user (the account whose role was activated)
+                targets = _target_users_from_audit(r)
+                initiator = _initiator_upn(r)
+                # For self-activations the initiator is the user; else use targets
+                upns = targets if targets else ([initiator] if initiator else [])
+                for upn in upns:
+                    pim_by_user[upn].append(r)
+
+        # Users with suspicious sign-ins
+        suspicious_signers: set[str] = set()
+        for r in signin_records:
+            if _has_flag_prefix(r, *_SUSPICIOUS_SIGNIN_PREFIXES):
+                upn = (r.get("userPrincipalName") or "").lower()
+                if upn:
+                    suspicious_signers.add(upn)
+
+        findings: list[Finding] = []
+        for upn, pim_recs in pim_by_user.items():
+            if upn not in suspicious_signers:
+                continue
+
+            # Collect supporting signin evidence
+            susp_signins = [
+                r for r in signin_records
+                if (r.get("userPrincipalName") or "").lower() == upn
+                and _has_flag_prefix(r, *_SUSPICIOUS_SIGNIN_PREFIXES)
+            ]
+
+            role_names = list({
+                f[len("HIGH_PRIV_PIM_ACTIVATION:"):] for r in pim_recs
+                for f in _flags(r) if f.startswith("HIGH_PRIV_PIM_ACTIVATION:")
+            })
+            role_str = ", ".join(role_names[:3])
+
+            evidence: list[Evidence] = []
+            for r in pim_recs[:3]:
+                role = next(
+                    (f[len("HIGH_PRIV_PIM_ACTIVATION:"):] for f in _flags(r)
+                     if f.startswith("HIGH_PRIV_PIM_ACTIVATION:")), "unknown role"
+                )
+                evidence.append(_evidence(
+                    r, "pim_activations", "activityDateTime",
+                    f"PIM activation of high-privilege role: {role}",
+                ))
+            for r in susp_signins[:2]:
+                susp_flags = [f for f in _flags(r) if any(f.startswith(p) for p in _SUSPICIOUS_SIGNIN_PREFIXES)]
+                evidence.append(_evidence(
+                    r, "signin_logs", "createdDateTime",
+                    f"Suspicious sign-in: {', '.join(susp_flags[:3])}",
+                ))
+
+            findings.append(Finding(
+                id="",
+                rule="pim_activation_after_suspicious_signin",
+                severity="high",
+                title=f"PIM high-privilege activation following suspicious sign-in — {upn}",
+                user=upn,
+                description=(
+                    f"{upn} activated a privileged role ({role_str}) via PIM, "
+                    "and also had a suspicious sign-in event in the collection window. "
+                    "This pattern is consistent with an attacker who compromised the account, "
+                    "signed in using an evasion technique, then self-activated a PIM role "
+                    "to gain elevated privileges for subsequent administrative actions."
+                ),
+                evidence=evidence,
+                recommendation=(
+                    "Immediately review the PIM activation log to confirm whether the "
+                    f"activation of {role_str} was authorised. "
+                    "Check directory audit logs for admin actions taken while the role was active. "
+                    "If suspicious: revoke all sessions, reset credentials, remove any new MFA "
+                    "methods or OAuth grants, and review all PIM eligible assignments for this account."
+                ),
+            ))
+
+        return findings
+
+    def _rule_ca_coverage_gap(self) -> list[Finding]:
+        """
+        A user had one or more successful sign-ins where no Conditional Access
+        policy was evaluated (appliedConditionalAccessPolicies is empty or all
+        policies were notApplied/notEnabled).
+
+        This reveals accounts that can authenticate completely outside the tenant's
+        CA enforcement boundary — either because no policies target them, they are
+        excluded from all policies, or they use a legacy auth client that CA cannot
+        evaluate. Attackers deliberately target accounts or flows that fall outside CA.
+        """
+        signin_records = self._d("signin_logs")
+        if not signin_records:
+            return []
+
+        by_user: dict[str, list[dict]] = defaultdict(list)
+        for r in signin_records:
+            # Only look at successful sign-ins
+            status = r.get("status") or {}
+            if (status.get("errorCode") or 0) != 0:
+                continue
+
+            policies = r.get("appliedConditionalAccessPolicies") or []
+            # A record has CA applied if at least one policy has result "success" or "failure"
+            ca_applied = any(
+                (p.get("result") or "").lower() in ("success", "failure", "reportonlysuccess", "reportonlyfailure")
+                for p in policies
+            )
+            if ca_applied:
+                continue
+
+            upn = (r.get("userPrincipalName") or "").lower()
+            if upn:
+                by_user[upn].append(r)
+
+        findings: list[Finding] = []
+        for upn, no_ca_records in by_user.items():
+            # Only flag if there are multiple CA-gap sign-ins (reduces noise on SPNs/service accounts)
+            if len(no_ca_records) < 2:
+                continue
+
+            apps: list[str] = list({
+                r.get("clientAppUsed") or r.get("appDisplayName") or "unknown"
+                for r in no_ca_records
+            })[:4]
+            countries: list[str] = list({
+                (r.get("location") or {}).get("countryOrRegion") or "unknown"
+                for r in no_ca_records
+            })[:4]
+
+            evidence: list[Evidence] = []
+            for r in no_ca_records[:4]:
+                app = r.get("clientAppUsed") or r.get("appDisplayName") or "unknown"
+                country = (r.get("location") or {}).get("countryOrRegion") or ""
+                evidence.append(_evidence(
+                    r, "signin_logs", "createdDateTime",
+                    f"CA-gap sign-in via {app}" + (f" from {country}" if country else ""),
+                ))
+
+            findings.append(Finding(
+                id="",
+                rule="ca_coverage_gap",
+                severity="medium",
+                title=f"Successful sign-ins with no Conditional Access applied — {upn}",
+                user=upn,
+                description=(
+                    f"{upn} had {len(no_ca_records)} successful sign-in(s) where no "
+                    "Conditional Access policy was evaluated. "
+                    f"Applications used: {', '.join(apps)}. "
+                    f"Countries: {', '.join(countries)}. "
+                    "This means the account bypassed MFA, device compliance, and location "
+                    "restrictions for these sessions — intentionally or due to a policy gap."
+                ),
+                evidence=evidence,
+                recommendation=(
+                    f"Review whether {upn} is intentionally excluded from CA policies. "
+                    "Check Entra ID > Security > Conditional Access > Sign-in logs to "
+                    "identify which policies should have applied. "
+                    "Ensure no 'break-glass' exclusions are being abused. "
+                    "If using legacy auth clients, block legacy auth via CA "
+                    "(policy: block when clientAppTypes includes exchangeActiveSync/other)."
+                ),
             ))
 
         return findings

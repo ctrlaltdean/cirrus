@@ -52,6 +52,10 @@ _ABUSEIPDB_CHECK_URL = "https://api.abuseipdb.com/api/v2/check"
 _ABUSEIPDB_MAX_AGE   = 90   # days to look back for reports
 _ABUSEIPDB_THROTTLE  = 1.1  # seconds between requests (free tier: ~1 req/sec)
 
+# ── VirusTotal constants ──────────────────────────────────────────────────────
+_VT_IP_URL   = "https://www.virustotal.com/api/v3/ip_addresses/{ip}"
+_VT_THROTTLE = 15.1  # seconds between requests (free tier: 4 requests/minute)
+
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
 
@@ -69,6 +73,9 @@ class IPEnrichment:
     is_tor: bool = False
     abuse_score: int | None = None      # 0–100; None = AbuseIPDB not queried
     abuse_reports: int | None = None    # None = AbuseIPDB not queried
+    vt_malicious: int | None = None     # VT malicious vendor votes; None = not queried
+    vt_suspicious: int | None = None    # VT suspicious vendor votes; None = not queried
+    vt_harmless: int | None = None      # VT harmless vendor votes; None = not queried
     error: str = ""
 
     @property
@@ -83,6 +90,8 @@ class IPEnrichment:
             tags.append("PROXY/VPN")
         if self.abuse_score is not None and self.abuse_score >= 25:
             tags.append(f"ABUSE_SCORE:{self.abuse_score}")
+        if self.vt_malicious is not None and self.vt_malicious > 0:
+            tags.append(f"VT_MALICIOUS:{self.vt_malicious}")
         return tags
 
     @property
@@ -221,11 +230,52 @@ def _enrich_single_abuseipdb(
         return None, None, str(exc)[:80]
 
 
+# ── VirusTotal enrichment ─────────────────────────────────────────────────────
+
+def _enrich_single_virustotal(
+    ip: str,
+    api_key: str,
+    session: requests.Session,
+) -> tuple[int | None, int | None, int | None, str]:
+    """
+    Query VirusTotal for a single IP address.
+
+    Returns (malicious_count, suspicious_count, harmless_count, error_string).
+    Free tier: 4 lookups/minute — callers must throttle to _VT_THROTTLE seconds.
+    """
+    try:
+        resp = session.get(
+            _VT_IP_URL.format(ip=ip),
+            headers={"x-apikey": api_key, "Accept": "application/json"},
+            timeout=15,
+        )
+        if resp.status_code == 429:
+            return None, None, None, "VirusTotal rate limit hit"
+        if resp.status_code == 401:
+            return None, None, None, "VirusTotal: invalid API key"
+        if resp.status_code == 404:
+            return 0, 0, 0, ""
+        resp.raise_for_status()
+        body = resp.json()
+        stats = (
+            body.get("data", {})
+                .get("attributes", {})
+                .get("last_analysis_stats", {})
+        )
+        malicious  = stats.get("malicious", 0)
+        suspicious = stats.get("suspicious", 0)
+        harmless   = stats.get("harmless", 0)
+        return int(malicious), int(suspicious), int(harmless), ""
+    except Exception as exc:
+        return None, None, None, str(exc)[:80]
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def enrich_ips_batch(
     ips: set[str],
     abuseipdb_key: str | None = None,
+    vt_key: str | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, IPEnrichment]:
     """
@@ -239,8 +289,10 @@ def enrich_ips_batch(
         ips:            Set of public IP address strings.
         abuseipdb_key:  AbuseIPDB API key (optional).
                         Register free at https://www.abuseipdb.com/register
+        vt_key:         VirusTotal API key (optional, free tier: 4/min).
+                        Register free at https://www.virustotal.com/
         on_progress:    Optional callback called with a status string on each
-                        batch / AbuseIPDB query.
+                        batch / AbuseIPDB / VT query.
 
     Returns:
         Dict keyed by IP string mapping to IPEnrichment dataclasses.
@@ -277,12 +329,28 @@ def enrich_ips_batch(
             if idx < len(ip_list) - 1:
                 time.sleep(_ABUSEIPDB_THROTTLE)
 
+    # ── Step 3: VirusTotal (optional, throttled — free tier: 4 req/min) ───────
+    if vt_key:
+        for idx, ip in enumerate(ip_list):
+            if on_progress:
+                on_progress(f"VirusTotal: checking {ip} ({idx + 1}/{len(ip_list)})")
+            mal, susp, harm, err = _enrich_single_virustotal(ip, vt_key, session)
+            if ip in results:
+                results[ip].vt_malicious  = mal
+                results[ip].vt_suspicious = susp
+                results[ip].vt_harmless   = harm
+                if err and not results[ip].error:
+                    results[ip].error = err
+            if idx < len(ip_list) - 1:
+                time.sleep(_VT_THROTTLE)
+
     return results
 
 
 def run_enrichment(
     case_dir: Path,
     abuseipdb_key: str | None = None,
+    vt_key: str | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, dict]:
     """
@@ -309,7 +377,7 @@ def run_enrichment(
     if on_progress:
         on_progress(f"Found {len(ips)} unique public IP(s) — starting enrichment...")
 
-    enriched = enrich_ips_batch(ips, abuseipdb_key=abuseipdb_key, on_progress=on_progress)
+    enriched = enrich_ips_batch(ips, abuseipdb_key=abuseipdb_key, vt_key=vt_key, on_progress=on_progress)
 
     # Serialize to JSON-safe dict
     ips_dict: dict[str, dict] = {}
@@ -326,6 +394,7 @@ def run_enrichment(
         "total_ips":       len(enriched),
         "suspicious_count": suspicious_count,
         "abuseipdb_used":  bool(abuseipdb_key),
+        "vt_used":         bool(vt_key),
         "ips":             ips_dict,
     }
 

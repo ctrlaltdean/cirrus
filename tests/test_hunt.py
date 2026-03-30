@@ -24,6 +24,7 @@ from cirrus.analysis.hunt import (
     _hunt_oauth_risky_apps,
     _hunt_password_spray,
     _hunt_signin_anomalies,
+    _hunt_stale_accounts,
     run_hunt,
 )
 
@@ -348,22 +349,29 @@ class TestHuntPasswordSpray:
 
 # ── run_hunt orchestration ─────────────────────────────────────────────────────
 
+def _noop_dt(session, start_dt):
+    return ([], None)
+
+
+def _noop(session):
+    return ([], None)
+
+
+def _noop_stale(session, stale_days=90):
+    return ([], None)
+
+
 class TestRunHunt:
     def test_run_hunt_returns_report(self):
         def _fake_signin(session, start_dt):
             return ([HuntTarget("u@t.com", "user", [HuntSignal("s", "high", "d")])], None)
-        def _fake_admin(session, start_dt):
-            return ([], None)
-        def _fake_oauth(session):
-            return ([], None)
-        def _fake_spray(session, start_dt):
-            return ([], None)
 
         with (
             patch("cirrus.analysis.hunt._hunt_signin_anomalies", _fake_signin),
-            patch("cirrus.analysis.hunt._hunt_new_admin_accounts", _fake_admin),
-            patch("cirrus.analysis.hunt._hunt_oauth_risky_apps", _fake_oauth),
-            patch("cirrus.analysis.hunt._hunt_password_spray", _fake_spray),
+            patch("cirrus.analysis.hunt._hunt_new_admin_accounts", _noop_dt),
+            patch("cirrus.analysis.hunt._hunt_oauth_risky_apps", _noop),
+            patch("cirrus.analysis.hunt._hunt_password_spray", _noop_dt),
+            patch("cirrus.analysis.hunt._hunt_stale_accounts", _noop_stale),
         ):
             report = run_hunt(token="tok", days=7, tenant="test.com")
 
@@ -379,16 +387,13 @@ class TestRunHunt:
             return ([t1], None)
         def _fake_admin(session, start_dt):
             return ([t2], None)
-        def _fake_oauth(session):
-            return ([], None)
-        def _fake_spray(session, start_dt):
-            return ([], None)
 
         with (
             patch("cirrus.analysis.hunt._hunt_signin_anomalies", _fake_signin),
             patch("cirrus.analysis.hunt._hunt_new_admin_accounts", _fake_admin),
-            patch("cirrus.analysis.hunt._hunt_oauth_risky_apps", _fake_oauth),
-            patch("cirrus.analysis.hunt._hunt_password_spray", _fake_spray),
+            patch("cirrus.analysis.hunt._hunt_oauth_risky_apps", _noop),
+            patch("cirrus.analysis.hunt._hunt_password_spray", _noop_dt),
+            patch("cirrus.analysis.hunt._hunt_stale_accounts", _noop_stale),
         ):
             report = run_hunt(token="tok", days=7)
 
@@ -398,18 +403,13 @@ class TestRunHunt:
     def test_run_hunt_collects_errors(self):
         def _fake_signin(session, start_dt):
             return ([], "signin_anomalies: 403")
-        def _fake_admin(session, start_dt):
-            return ([], None)
-        def _fake_oauth(session):
-            return ([], None)
-        def _fake_spray(session, start_dt):
-            return ([], None)
 
         with (
             patch("cirrus.analysis.hunt._hunt_signin_anomalies", _fake_signin),
-            patch("cirrus.analysis.hunt._hunt_new_admin_accounts", _fake_admin),
-            patch("cirrus.analysis.hunt._hunt_oauth_risky_apps", _fake_oauth),
-            patch("cirrus.analysis.hunt._hunt_password_spray", _fake_spray),
+            patch("cirrus.analysis.hunt._hunt_new_admin_accounts", _noop_dt),
+            patch("cirrus.analysis.hunt._hunt_oauth_risky_apps", _noop),
+            patch("cirrus.analysis.hunt._hunt_password_spray", _noop_dt),
+            patch("cirrus.analysis.hunt._hunt_stale_accounts", _noop_stale),
         ):
             report = run_hunt(token="tok", days=7)
 
@@ -422,16 +422,13 @@ class TestRunHunt:
 
         def _fake_signin(session, start_dt):
             return ([high1, med, high2], None)
-        def _noop_dt(session, start_dt):
-            return ([], None)
-        def _noop(session):
-            return ([], None)
 
         with (
             patch("cirrus.analysis.hunt._hunt_signin_anomalies", _fake_signin),
             patch("cirrus.analysis.hunt._hunt_new_admin_accounts", _noop_dt),
             patch("cirrus.analysis.hunt._hunt_oauth_risky_apps", _noop),
             patch("cirrus.analysis.hunt._hunt_password_spray", _noop_dt),
+            patch("cirrus.analysis.hunt._hunt_stale_accounts", _noop_stale),
         ):
             report = run_hunt(token="tok", days=7)
 
@@ -439,3 +436,112 @@ class TestRunHunt:
         assert names[0] == "h2@t.com"   # high, 2 signals
         assert names[1] == "h1@t.com"   # high, 1 signal
         assert names[2] == "m@t.com"    # medium
+
+
+# ── _hunt_stale_accounts ───────────────────────────────────────────────────────
+
+class TestHuntStaleAccounts:
+    def _session(self) -> MagicMock:
+        return MagicMock()
+
+    def _make_collect(self, users: list[dict]):
+        def _fake(session, url, params=None, max_records=5000, **kw):
+            return users
+        return _fake
+
+    def _stale_user(self, upn: str, days_ago: int = 120) -> dict:
+        from datetime import datetime, timezone, timedelta
+        last = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {
+            "userPrincipalName": upn,
+            "assignedLicenses": [{"skuId": "abc"}],
+            "signInActivity": {"lastSignInDateTime": last, "lastNonInteractiveSignInDateTime": last},
+            "createdDateTime": (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def _never_signed_in_user(self, upn: str) -> dict:
+        from datetime import datetime, timezone, timedelta
+        return {
+            "userPrincipalName": upn,
+            "assignedLicenses": [{"skuId": "abc"}],
+            "signInActivity": None,
+            "createdDateTime": (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def _active_user(self, upn: str) -> dict:
+        from datetime import datetime, timezone, timedelta
+        recent = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {
+            "userPrincipalName": upn,
+            "assignedLicenses": [{"skuId": "abc"}],
+            "signInActivity": {"lastSignInDateTime": recent},
+            "createdDateTime": (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def _unlicensed_user(self, upn: str) -> dict:
+        from datetime import datetime, timezone, timedelta
+        last = (datetime.now(timezone.utc) - timedelta(days=200)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {
+            "userPrincipalName": upn,
+            "assignedLicenses": [],
+            "signInActivity": {"lastSignInDateTime": last},
+            "createdDateTime": (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def test_stale_licensed_user_flagged_medium(self):
+        users = [self._stale_user("stale@test.com", days_ago=120)]
+        with patch("cirrus.analysis.hunt._collect_all", self._make_collect(users)):
+            targets, err = _hunt_stale_accounts(self._session(), stale_days=90)
+        assert err is None
+        assert len(targets) == 1
+        assert targets[0].signals[0].severity == "medium"
+
+    def test_never_signed_in_user_flagged_high(self):
+        users = [self._never_signed_in_user("ghost@test.com")]
+        with patch("cirrus.analysis.hunt._collect_all", self._make_collect(users)):
+            targets, err = _hunt_stale_accounts(self._session(), stale_days=90)
+        assert err is None
+        assert len(targets) == 1
+        assert targets[0].signals[0].severity == "high"
+
+    def test_active_user_not_flagged(self):
+        users = [self._active_user("active@test.com")]
+        with patch("cirrus.analysis.hunt._collect_all", self._make_collect(users)):
+            targets, err = _hunt_stale_accounts(self._session(), stale_days=90)
+        assert targets == []
+
+    def test_unlicensed_user_skipped(self):
+        users = [self._unlicensed_user("unlicensed@test.com")]
+        with patch("cirrus.analysis.hunt._collect_all", self._make_collect(users)):
+            targets, err = _hunt_stale_accounts(self._session(), stale_days=90)
+        assert targets == []
+
+    def test_recently_created_no_signin_skipped(self):
+        """New account within stale_days with no sign-in — expected, should not flag."""
+        from datetime import datetime, timezone, timedelta
+        recent_created = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        user = {
+            "userPrincipalName": "newuser@test.com",
+            "assignedLicenses": [{"skuId": "abc"}],
+            "signInActivity": None,
+            "createdDateTime": recent_created,
+        }
+        with patch("cirrus.analysis.hunt._collect_all", self._make_collect([user])):
+            targets, err = _hunt_stale_accounts(self._session(), stale_days=90)
+        assert targets == []
+
+    def test_permission_error_returns_error_string(self):
+        def _raise(*a, **kw):
+            raise PermissionError("403")
+        with patch("cirrus.analysis.hunt._collect_all", _raise):
+            targets, err = _hunt_stale_accounts(self._session(), stale_days=90)
+        assert targets == []
+        assert err is not None
+        assert "stale_accounts" in err
+
+    def test_stale_days_threshold_respected(self):
+        """A user whose last sign-in is exactly at the cutoff is not flagged."""
+        users = [self._stale_user("borderline@test.com", days_ago=89)]
+        with patch("cirrus.analysis.hunt._collect_all", self._make_collect(users)):
+            targets, err = _hunt_stale_accounts(self._session(), stale_days=90)
+        assert targets == []

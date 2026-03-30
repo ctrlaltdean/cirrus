@@ -1516,6 +1516,101 @@ def case_verify(
         raise typer.Exit(2)
 
 
+@case_app.command("package")
+def case_package(
+    case_dir: Annotated[Path, typer.Argument(help="Path to the case folder to package.")],
+    output: Annotated[Optional[Path], typer.Option("--output", "-o", help="Output zip path (default: <case_name>.zip beside the case folder).")] = None,
+) -> None:
+    """
+    Package a case folder into a zip archive with a SHA-256 file manifest.
+
+    Creates a self-contained zip containing all case artifacts and a
+    chain_of_custody.json / chain_of_custody.txt with SHA-256 hashes of
+    every file. Suitable for legal handoff, evidence preservation, or
+    archival.
+
+    \\b
+    Examples:
+        cirrus case package ./investigations/CONTOSO_ATO_2026-03-30
+        cirrus case package ./investigations/CONTOSO_ATO_2026-03-30 -o evidence.zip
+    """
+    import hashlib
+    import zipfile
+
+    _banner()
+
+    if not case_dir.exists() or not case_dir.is_dir():
+        console.print(f"[red]Case folder not found:[/red] {case_dir}")
+        raise typer.Exit(1)
+
+    zip_path = output or case_dir.parent / f"{case_dir.name}.zip"
+    if zip_path.exists():
+        console.print(f"[yellow]Output file already exists:[/yellow] {zip_path}")
+        if not Confirm.ask("Overwrite?", default=False):
+            raise typer.Exit(0)
+        zip_path.unlink()
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # ── Collect all files and compute SHA-256 ──────────────────────────────
+    file_hashes: list[dict] = []
+    all_files = sorted(
+        (p for p in case_dir.rglob("*") if p.is_file()),
+        key=lambda p: str(p.relative_to(case_dir)),
+    )
+
+    with console.status("[dim]Computing file hashes...[/dim]"):
+        for fp in all_files:
+            h = hashlib.sha256()
+            with fp.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(65536), b""):
+                    h.update(chunk)
+            file_hashes.append({
+                "file": str(fp.relative_to(case_dir)).replace("\\", "/"),
+                "size_bytes": fp.stat().st_size,
+                "sha256": h.hexdigest(),
+            })
+
+    # ── Chain of custody document ──────────────────────────────────────────
+    coc_data = {
+        "generated_at": generated_at,
+        "case_name": case_dir.name,
+        "total_files": len(file_hashes),
+        "total_bytes": sum(f["size_bytes"] for f in file_hashes),
+        "files": file_hashes,
+    }
+    coc_json = json.dumps(coc_data, indent=2, ensure_ascii=False)
+
+    coc_lines = [
+        "CIRRUS — Chain of Custody Manifest",
+        f"Case:      {case_dir.name}",
+        f"Packaged:  {generated_at}",
+        f"Files:     {len(file_hashes)}",
+        f"Total:     {coc_data['total_bytes']:,} bytes",
+        "",
+        f"{'SHA-256':<64}  {'Size':>12}  File",
+        "-" * 100,
+    ]
+    for f in file_hashes:
+        coc_lines.append(f"{f['sha256']}  {f['size_bytes']:>12,}  {f['file']}")
+    coc_text = "\n".join(coc_lines) + "\n"
+
+    # ── Write zip ─────────────────────────────────────────────────────────
+    with console.status(f"[dim]Creating {zip_path.name}...[/dim]"):
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for fp in all_files:
+                zf.write(fp, arcname=str(fp.relative_to(case_dir.parent)))
+            # Add manifest files at root level of zip
+            zf.writestr(f"{case_dir.name}/chain_of_custody.json", coc_json)
+            zf.writestr(f"{case_dir.name}/chain_of_custody.txt", coc_text)
+
+    zip_size = zip_path.stat().st_size
+    console.print(f"\n[green]✓ Package created:[/green] [cyan]{zip_path}[/cyan]")
+    console.print(f"  [dim]Files:[/dim]   {len(file_hashes)} artifacts + 2 manifest files")
+    console.print(f"  [dim]Size:[/dim]    {zip_size:,} bytes ({zip_size // 1024:,} KB)")
+    console.print(f"  [dim]Manifest:[/dim] chain_of_custody.json / chain_of_custody.txt (SHA-256 per file)\n")
+
+
 @case_app.command("list")
 def case_list(
     output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
@@ -1745,6 +1840,15 @@ def enrich(
             "1,000 requests/day. Set once in your shell: export ABUSEIPDB_KEY=<key>"
         ),
     )] = None,
+    vt_key: Annotated[Optional[str], typer.Option(
+        "--vt-key",
+        envvar="VT_KEY",
+        help=(
+            "VirusTotal API key for additional IP reputation data (optional). "
+            "Register free at https://www.virustotal.com/ — free tier: 4 lookups/minute. "
+            "Set once in your shell: export VT_KEY=<key>"
+        ),
+    )] = None,
 ) -> None:
     """
     Enrich IP addresses from a collected case with geo, ASN, and threat data.
@@ -1760,14 +1864,16 @@ def enrich(
     IP data sources:
         ip-api.com   — free, no key required, batch geo/ASN/hosting/proxy/tor
         AbuseIPDB    — optional, requires free API key (see --abuseipdb-key)
-                       Register: https://www.abuseipdb.com/register
-                       Docs:     https://docs.abuseipdb.com/
+                       Register: https://www.abuseipdb.com/register  (1,000/day free)
+        VirusTotal   — optional, requires free API key (see --vt-key)
+                       Register: https://www.virustotal.com/  (4/min free)
 
     \\b
     Examples:
         cirrus enrich ./investigations/CONTOSO_20260101_120000
         cirrus enrich ./investigations/CONTOSO_20260101_120000 --abuseipdb-key abc123
-        ABUSEIPDB_KEY=abc123 cirrus enrich ./investigations/CONTOSO_20260101_120000
+        cirrus enrich ./investigations/CONTOSO_20260101_120000 --vt-key xyz789
+        ABUSEIPDB_KEY=abc123 VT_KEY=xyz789 cirrus enrich ./investigations/CONTOSO_20260101_120000
     """
     _banner()
 
@@ -1794,7 +1900,7 @@ def enrich(
         progress_msgs.append(msg)
 
     with console.status("[dim]Querying enrichment APIs...[/dim]"):
-        result = run_enrichment(case_dir, abuseipdb_key=abuseipdb_key, on_progress=_on_progress)
+        result = run_enrichment(case_dir, abuseipdb_key=abuseipdb_key, vt_key=vt_key, on_progress=_on_progress)
 
     total = result.get("total_ips", 0)
     suspicious = result.get("suspicious_count", 0)
@@ -1849,6 +1955,97 @@ def enrich(
         f"\n[bold]Total:[/bold] {total} IP(s)  "
         f"[{'red' if suspicious else 'green'}]{suspicious} suspicious[/{'red' if suspicious else 'green'}]\n"
         f"[bold]Output:[/bold] [cyan]{case_dir / 'ip_enrichment.json'}[/cyan]\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Enrich-domains command
+# ---------------------------------------------------------------------------
+
+@app.command("enrich-domains")
+def enrich_domains(
+    case_dir: Annotated[Path, typer.Argument(help="Path to the case folder to enrich.")],
+) -> None:
+    """
+    Enrich domains from a collected case with RDAP registration age and DNS data.
+
+    Extracts domain names from IOC flags in collector output (forwarding addresses,
+    external email OTP addresses, SMTP forward targets) and queries each domain for:
+      - Registration date and age via RDAP (no API key required)
+      - MX records and whether mail routes to consumer providers (Gmail, Outlook, etc.)
+      - SPF and DMARC presence
+
+    Writes domain_enrichment.json to the case folder. A new "Domains" tab appears
+    in the HTML report when you next run `cirrus analyze`.
+
+    \\b
+    Examples:
+        cirrus enrich-domains ./investigations/CONTOSO_20260101_120000
+    """
+    _banner()
+
+    if not case_dir.exists() or not case_dir.is_dir():
+        console.print(f"[red]Case folder not found:[/red] {case_dir}")
+        raise typer.Exit(1)
+
+    from cirrus.analysis.domain_enrichment import run_domain_enrichment
+
+    console.print(f"\n[bold]Enriching domains[/bold] in [cyan]{case_dir}[/cyan] [dim](RDAP + DNS)[/dim]\n")
+
+    current: list[str] = []
+
+    def _on_progress(domain: str) -> None:
+        current.clear()
+        current.append(domain)
+
+    with console.status("[dim]Querying RDAP and DNS...[/dim]") as status:
+        result = run_domain_enrichment(case_dir, on_progress=_on_progress)
+
+    total = result.get("total_domains", 0)
+    suspicious = result.get("suspicious_count", 0)
+    domains_dict = result.get("domains") or {}
+
+    if total == 0:
+        console.print("[yellow]No external domains found in case files.[/yellow]")
+        console.print("[dim]Domain enrichment extracts domains from FORWARDS_TO, EXTERNAL_SMTP_FORWARD, and EXTERNAL_EMAIL_OTP flags.[/dim]")
+        return
+
+    table = Table(
+        title=f"Domain Enrichment — {total} domain(s)",
+        border_style="bright_blue",
+        header_style="bold",
+        show_lines=False,
+    )
+    table.add_column("Domain", style="cyan", min_width=24)
+    table.add_column("Age", width=10, justify="right")
+    table.add_column("Registrar", max_width=24)
+    table.add_column("MX", max_width=32)
+    table.add_column("Threat Tags")
+
+    for domain, data in sorted(domains_dict.items()):
+        tags = data.get("threat_summary") or []
+        age_days = data.get("age_days")
+        age_str = f"{age_days}d" if age_days is not None else "—"
+        if age_days is not None and age_days < 30:
+            age_str = f"[red]{age_str}[/red]"
+        elif age_days is not None and age_days < 90:
+            age_str = f"[yellow]{age_str}[/yellow]"
+
+        mx = data.get("mx_records") or []
+        mx_str = mx[0][:30] if mx else "no MX"
+        if data.get("routes_to_consumer_mail"):
+            mx_str = f"[yellow]{mx_str}[/yellow]"
+
+        tags_str = " ".join(tags)[:40] if tags else "[dim]clean[/dim]"
+        registrar = (data.get("registrar") or "—")[:22]
+
+        table.add_row(domain, age_str, registrar, mx_str, tags_str)
+
+    console.print(table)
+    console.print(
+        f"\n[bold]Total:[/bold] {total} domain(s)  "
+        f"[{'red' if suspicious else 'green'}]{suspicious} suspicious[/{'red' if suspicious else 'green'}]\n"
+        f"[bold]Output:[/bold] [cyan]{case_dir / 'domain_enrichment.json'}[/cyan]\n"
     )
 
 
@@ -2032,6 +2229,7 @@ def _render_blast_radius_report(report: "BlastRadiusReport") -> None:
 def hunt(
     tenant: TenantOpt = None,
     days: Annotated[int, typer.Option("--days", help="How many days back to scan (default 30).")] = 30,
+    stale_days: Annotated[int, typer.Option("--stale-days", help="Days of inactivity before an account is considered stale (default 90).")] = 90,
 ) -> None:
     """
     Perform a proactive tenant-wide threat hunt without a known starting account.
@@ -2065,8 +2263,8 @@ def hunt(
 
     from cirrus.analysis.hunt import run_hunt
 
-    with console.status("[dim]Running 4 hunt checks in parallel...[/dim]"):
-        report = run_hunt(token=token, days=days, tenant=tenant or "")
+    with console.status("[dim]Running 5 hunt checks in parallel...[/dim]"):
+        report = run_hunt(token=token, days=days, tenant=tenant or "", stale_days=stale_days)
 
     # ── Errors ──────────────────────────────────────────────────────────────
     if report.errors:

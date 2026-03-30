@@ -22,6 +22,7 @@ from cirrus.analysis.ip_enrichment import (
     IPEnrichment,
     _enrich_batch_ipapi,
     _enrich_single_abuseipdb,
+    _enrich_single_virustotal,
     enrich_ips_batch,
     extract_ips_from_case,
     run_enrichment,
@@ -58,6 +59,18 @@ class TestIPEnrichmentDataclass:
     def test_threat_summary_abuse_score_none_not_included(self):
         e = IPEnrichment(ip="1.2.3.4", abuse_score=None)
         assert not any("ABUSE_SCORE" in t for t in e.threat_summary)
+
+    def test_threat_summary_vt_malicious(self):
+        e = IPEnrichment(ip="1.2.3.4", vt_malicious=3)
+        assert any("VT_MALICIOUS" in t for t in e.threat_summary)
+
+    def test_threat_summary_vt_malicious_zero_not_included(self):
+        e = IPEnrichment(ip="1.2.3.4", vt_malicious=0)
+        assert not any("VT_MALICIOUS" in t for t in e.threat_summary)
+
+    def test_threat_summary_vt_malicious_none_not_included(self):
+        e = IPEnrichment(ip="1.2.3.4", vt_malicious=None)
+        assert not any("VT_MALICIOUS" in t for t in e.threat_summary)
 
     def test_is_suspicious_false_by_default(self):
         assert not IPEnrichment(ip="1.2.3.4").is_suspicious
@@ -421,3 +434,168 @@ class TestRunEnrichment:
         ip_data = result["ips"]["3.3.3.3"]
         assert ip_data["is_suspicious"] is True
         assert "PROXY/VPN" in ip_data["threat_summary"]
+
+
+# ── _enrich_single_virustotal ──────────────────────────────────────────────────
+
+class TestEnrichSingleVirusTotal:
+    def _make_session(self, status_code: int, body: dict):
+        session = MagicMock()
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = body
+        resp.raise_for_status.return_value = None
+        session.get.return_value = resp
+        return session
+
+    def test_successful_lookup(self):
+        session = self._make_session(200, {
+            "data": {"attributes": {"last_analysis_stats": {
+                "malicious": 5, "suspicious": 2, "harmless": 40
+            }}}
+        })
+        mal, susp, harm, err = _enrich_single_virustotal("8.8.8.8", "vtkey", session)
+        assert mal == 5
+        assert susp == 2
+        assert harm == 40
+        assert err == ""
+
+    def test_zero_detections(self):
+        session = self._make_session(200, {
+            "data": {"attributes": {"last_analysis_stats": {
+                "malicious": 0, "suspicious": 0, "harmless": 72
+            }}}
+        })
+        mal, susp, harm, err = _enrich_single_virustotal("1.1.1.1", "vtkey", session)
+        assert mal == 0
+        assert err == ""
+
+    def test_404_returns_zeros(self):
+        session = self._make_session(404, {})
+        mal, susp, harm, err = _enrich_single_virustotal("1.2.3.4", "vtkey", session)
+        assert mal == 0
+        assert susp == 0
+        assert harm == 0
+        assert err == ""
+
+    def test_rate_limit_returns_error(self):
+        session = self._make_session(429, {})
+        mal, susp, harm, err = _enrich_single_virustotal("1.2.3.4", "vtkey", session)
+        assert mal is None
+        assert "rate limit" in err.lower()
+
+    def test_invalid_api_key_returns_error(self):
+        session = self._make_session(401, {})
+        mal, susp, harm, err = _enrich_single_virustotal("1.2.3.4", "badkey", session)
+        assert mal is None
+        assert "invalid api key" in err.lower() or "key" in err.lower()
+
+    def test_network_exception_returns_error(self):
+        session = MagicMock()
+        session.get.side_effect = Exception("timeout")
+        mal, susp, harm, err = _enrich_single_virustotal("1.2.3.4", "vtkey", session)
+        assert mal is None
+        assert err != ""
+
+
+# ── enrich_ips_batch — VirusTotal integration ──────────────────────────────────
+
+class TestEnrichIpsBatchVT:
+    def _ipapi_response(self, ip: str = "8.8.8.8"):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = [{
+            "query": ip, "status": "success",
+            "country": "US", "countryCode": "US", "city": "",
+            "org": "", "isp": "", "as": "",
+            "proxy": False, "hosting": False, "tor": False,
+        }]
+        return resp
+
+    def _vt_response(self, malicious: int = 3):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {
+            "data": {"attributes": {"last_analysis_stats": {
+                "malicious": malicious, "suspicious": 0, "harmless": 50,
+            }}}
+        }
+        return resp
+
+    def test_vt_queried_when_key_provided(self):
+        ipapi_resp = self._ipapi_response("5.5.5.5")
+        vt_resp = self._vt_response(malicious=2)
+
+        with patch("cirrus.analysis.ip_enrichment.requests.Session") as MockSession:
+            with patch("cirrus.analysis.ip_enrichment.time.sleep"):
+                inst = MagicMock()
+                inst.post.return_value = ipapi_resp
+                inst.get.return_value = vt_resp
+                MockSession.return_value = inst
+
+                result = enrich_ips_batch({"5.5.5.5"}, vt_key="vtapikey")
+
+        assert result["5.5.5.5"].vt_malicious == 2
+
+    def test_vt_not_queried_without_key(self):
+        ipapi_resp = self._ipapi_response("5.5.5.5")
+
+        with patch("cirrus.analysis.ip_enrichment.requests.Session") as MockSession:
+            inst = MagicMock()
+            inst.post.return_value = ipapi_resp
+            MockSession.return_value = inst
+
+            result = enrich_ips_batch({"5.5.5.5"}, vt_key=None)
+
+        inst.get.assert_not_called()
+        assert result["5.5.5.5"].vt_malicious is None
+
+    def test_vt_malicious_shows_in_threat_summary(self):
+        ipapi_resp = self._ipapi_response("9.9.9.9")
+        vt_resp = self._vt_response(malicious=5)
+
+        with patch("cirrus.analysis.ip_enrichment.requests.Session") as MockSession:
+            with patch("cirrus.analysis.ip_enrichment.time.sleep"):
+                inst = MagicMock()
+                inst.post.return_value = ipapi_resp
+                inst.get.return_value = vt_resp
+                MockSession.return_value = inst
+
+                result = enrich_ips_batch({"9.9.9.9"}, vt_key="vtapikey")
+
+        assert any("VT_MALICIOUS" in t for t in result["9.9.9.9"].threat_summary)
+
+    def test_run_enrichment_passes_vt_key(self, tmp_path: Path):
+        (tmp_path / "signin_logs.json").write_text(
+            json.dumps([{"ipAddress": "7.7.7.7"}])
+        )
+        ipapi_resp = self._ipapi_response("7.7.7.7")
+        vt_resp = self._vt_response(malicious=0)
+
+        with patch("cirrus.analysis.ip_enrichment.requests.Session") as MockSession:
+            with patch("cirrus.analysis.ip_enrichment.time.sleep"):
+                inst = MagicMock()
+                inst.post.return_value = ipapi_resp
+                inst.get.return_value = vt_resp
+                MockSession.return_value = inst
+
+                result = run_enrichment(tmp_path, vt_key="vtkey")
+
+        assert result["vt_used"] is True
+        assert "7.7.7.7" in result["ips"]
+
+    def test_run_enrichment_vt_used_false_without_key(self, tmp_path: Path):
+        (tmp_path / "signin_logs.json").write_text(
+            json.dumps([{"ipAddress": "2.2.2.2"}])
+        )
+        ipapi_resp = self._ipapi_response("2.2.2.2")
+
+        with patch("cirrus.analysis.ip_enrichment.requests.Session") as MockSession:
+            inst = MagicMock()
+            inst.post.return_value = ipapi_resp
+            MockSession.return_value = inst
+
+            result = run_enrichment(tmp_path)
+
+        assert result.get("vt_used") is False

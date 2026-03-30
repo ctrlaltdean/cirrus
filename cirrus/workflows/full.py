@@ -25,6 +25,7 @@ from cirrus.collectors.mailbox_rules import MailboxRulesCollector
 from cirrus.collectors.mfa_methods import MFAMethodsCollector
 from cirrus.collectors.oauth_grants import OAuthGrantsCollector
 from cirrus.collectors.risky_users import RiskySignInsCollector, RiskyUsersCollector
+from cirrus.collectors.pim_activations import PIMActivationsCollector
 from cirrus.collectors.service_principals import ServicePrincipalsCollector
 from cirrus.collectors.signin_logs import SignInLogsCollector
 from cirrus.collectors.sp_signin_logs import SPSignInLogsCollector
@@ -104,6 +105,11 @@ class FullWorkflow(BaseWorkflow):
                 SPSignInLogsCollector,
                 {"start_dt": start_dt, "end_dt": end_dt},
                 "Service principal sign-in logs",
+            ),
+            (
+                PIMActivationsCollector,
+                {"start_dt": start_dt, "end_dt": end_dt},
+                "PIM role activation history",
             ),
             (
                 UnifiedAuditCollector,

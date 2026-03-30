@@ -653,3 +653,164 @@ class TestMITREMapping:
         for f in report["findings"]:
             assert "mitre_techniques" in f
             assert isinstance(f["mitre_techniques"], list)
+
+
+# ── Rule: ca_coverage_gap ──────────────────────────────────────────────────────
+
+class TestCACoverageGap:
+    """Conditional Access coverage gap rule tests."""
+
+    UPN = "user@contoso.com"
+
+    def _no_ca_signin(self, upn: str = "user@contoso.com", **kw) -> dict:
+        """Successful sign-in with no CA policies applied."""
+        r = make_signin(upn=upn, error_code=0, **kw)
+        r["appliedConditionalAccessPolicies"] = []
+        return r
+
+    def _ca_signin(self, upn: str = "user@contoso.com") -> dict:
+        """Successful sign-in where at least one CA policy applied."""
+        r = make_signin(upn=upn, error_code=0)
+        r["appliedConditionalAccessPolicies"] = [
+            {"id": "policy-1", "displayName": "MFA Policy", "result": "success"}
+        ]
+        return r
+
+    def test_ca_gap_detected_medium(self, tmp_path):
+        records = [self._no_ca_signin() for _ in range(2)]
+        write_case_files(tmp_path, signin_logs=records)
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "ca_coverage_gap")
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "medium"
+        assert self.UPN in findings[0]["user"]
+
+    def test_single_ca_gap_not_flagged(self, tmp_path):
+        """Only one CA-gap sign-in — below the threshold of 2."""
+        write_case_files(tmp_path, signin_logs=[self._no_ca_signin()])
+        report = run(tmp_path)
+        assert not findings_for_rule(report, "ca_coverage_gap")
+
+    def test_ca_applied_not_flagged(self, tmp_path):
+        records = [self._ca_signin() for _ in range(3)]
+        write_case_files(tmp_path, signin_logs=records)
+        report = run(tmp_path)
+        assert not findings_for_rule(report, "ca_coverage_gap")
+
+    def test_failed_signin_not_counted(self, tmp_path):
+        """Failed sign-ins (error_code != 0) must not be counted in gap detection."""
+        # 3 failed sign-ins with no CA + 0 successes → should not fire
+        records = []
+        for _ in range(3):
+            r = make_signin(upn=self.UPN, error_code=50126)
+            r["appliedConditionalAccessPolicies"] = []
+            records.append(r)
+        write_case_files(tmp_path, signin_logs=records)
+        report = run(tmp_path)
+        assert not findings_for_rule(report, "ca_coverage_gap")
+
+    def test_not_applied_policy_not_counted_as_ca_covered(self, tmp_path):
+        """A policy with result 'notApplied' doesn't count as CA coverage."""
+        records = []
+        for _ in range(3):
+            r = make_signin(upn=self.UPN, error_code=0)
+            r["appliedConditionalAccessPolicies"] = [
+                {"id": "p1", "result": "notApplied"}
+            ]
+            records.append(r)
+        write_case_files(tmp_path, signin_logs=records)
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "ca_coverage_gap")
+        assert len(findings) == 1
+
+    def test_multiple_users_separate_findings(self, tmp_path):
+        alice = [self._no_ca_signin(upn="alice@contoso.com") for _ in range(2)]
+        bob   = [self._no_ca_signin(upn="bob@contoso.com") for _ in range(2)]
+        write_case_files(tmp_path, signin_logs=alice + bob)
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "ca_coverage_gap")
+        users = {f["user"] for f in findings}
+        assert "alice@contoso.com" in users
+        assert "bob@contoso.com" in users
+
+    def test_ca_gap_has_mitre_techniques(self, tmp_path):
+        records = [self._no_ca_signin() for _ in range(2)]
+        write_case_files(tmp_path, signin_logs=records)
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "ca_coverage_gap")
+        assert len(findings) == 1
+        techniques = findings[0].get("mitre_techniques") or []
+        assert any("T1078" in t for t in techniques)
+
+
+# ── Rule: pim_activation_after_suspicious_signin ──────────────────────────────
+
+class TestPIMActivationAfterSuspiciousSignin:
+    UPN = "privileged@contoso.com"
+
+    def _pim_record(self, upn: str, role: str = "Global Administrator") -> dict:
+        return {
+            "activityDisplayName": "Add member to role in pim completed",
+            "activityDateTime": "2026-03-28T14:00:00Z",
+            "result": "success",
+            "resultReason": "",
+            "initiatedBy": {"user": {"userPrincipalName": upn}},
+            "targetResources": [{"type": "User", "userPrincipalName": upn}],
+            "additionalDetails": [{"key": "roleName", "value": role}],
+            "_iocFlags": [f"HIGH_PRIV_PIM_ACTIVATION:{role}", f"PIM_ACTIVATION:{role}"],
+        }
+
+    def test_high_priv_pim_after_suspicious_signin_flagged(self, tmp_path):
+        signin = make_signin(
+            upn=self.UPN,
+            error_code=0,
+            ioc_flags=["SUSPICIOUS_AUTH_PROTOCOL:deviceCode"],
+        )
+        pim = self._pim_record(self.UPN)
+        write_case_files(tmp_path, signin_logs=[signin], pim_activations=[pim])
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "pim_activation_after_suspicious_signin")
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "high"
+        assert self.UPN in findings[0]["user"]
+
+    def test_low_priv_pim_not_flagged(self, tmp_path):
+        signin = make_signin(
+            upn=self.UPN,
+            error_code=0,
+            ioc_flags=["SUSPICIOUS_AUTH_PROTOCOL:deviceCode"],
+        )
+        pim_rec = self._pim_record(self.UPN, role="Reports Reader")
+        # Low-priv: no HIGH_PRIV_PIM_ACTIVATION flag
+        pim_rec["_iocFlags"] = ["PIM_ACTIVATION:Reports Reader"]
+        write_case_files(tmp_path, signin_logs=[signin], pim_activations=[pim_rec])
+        report = run(tmp_path)
+        assert not findings_for_rule(report, "pim_activation_after_suspicious_signin")
+
+    def test_no_suspicious_signin_not_flagged(self, tmp_path):
+        # Clean sign-in + high-priv PIM → no correlation
+        signin = make_signin(upn=self.UPN, error_code=0, ioc_flags=[])
+        pim = self._pim_record(self.UPN)
+        write_case_files(tmp_path, signin_logs=[signin], pim_activations=[pim])
+        report = run(tmp_path)
+        assert not findings_for_rule(report, "pim_activation_after_suspicious_signin")
+
+    def test_pim_without_signin_not_flagged(self, tmp_path):
+        pim = self._pim_record(self.UPN)
+        write_case_files(tmp_path, pim_activations=[pim])
+        report = run(tmp_path)
+        assert not findings_for_rule(report, "pim_activation_after_suspicious_signin")
+
+    def test_mitre_techniques_populated(self, tmp_path):
+        signin = make_signin(
+            upn=self.UPN,
+            error_code=0,
+            ioc_flags=["SUSPICIOUS_AUTH_PROTOCOL:deviceCode"],
+        )
+        pim = self._pim_record(self.UPN)
+        write_case_files(tmp_path, signin_logs=[signin], pim_activations=[pim])
+        report = run(tmp_path)
+        findings = findings_for_rule(report, "pim_activation_after_suspicious_signin")
+        if findings:
+            techniques = findings[0].get("mitre_techniques") or []
+            assert any("T1548" in t for t in techniques)
