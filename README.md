@@ -56,7 +56,7 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 
 | Feature | Description |
 |---|---|
-| **Quick Triage** | 8 parallel checks on a suspected compromised account — results in seconds, no case folder needed |
+| **Quick Triage + Handoff Package** | 8 parallel checks on a suspected compromised account — creates a case folder with SIEM-ready evidence and a structured `triage_report.json`. Add `--workflow` to run the full BEC+ATO collection in the same pass. Cyber team receives one ready-to-analyze package. |
 | **IP Enrichment** | Enrich all IPs in a case with geolocation, ASN, and threat intel (datacenter/proxy/Tor/VPN). Free via ip-api.com; optional AbuseIPDB abuse scoring |
 | **Blast Radius** | Map a compromised account's full access footprint — directory roles, groups, app roles, owned objects, OAuth grants, and recent sign-in apps — in parallel |
 | **BEC Workflow** | Targeted 10-step collection for Business Email Compromise investigations |
@@ -80,14 +80,25 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 
 ## Quick Start
 
-**Step 1 — Fast triage on a suspected account (seconds, no files written):**
+**Helpdesk triage — fast first-look, creates a handoff package:**
 ```bash
 cirrus triage --tenant contoso.com --user john@contoso.com
 ```
+Runs 8 checks in ~30 seconds and creates a case folder with `triage_report.json` and SIEM-ready NDJSON files for every check. Hand the folder to your cyber team.
 
-**Step 2 — Full investigation if triage shows something suspicious:**
+**Include full BEC+ATO collection in the same pass:**
 ```bash
-cirrus run ato --tenant contoso.com --user john@contoso.com --days 30
+cirrus triage --tenant contoso.com --user john@contoso.com --workflow
+```
+Triage + full collection in one command. One case folder, complete evidence package ready for analysis.
+
+**Cyber team picks up the case:**
+```bash
+cirrus analyze investigations/CONTOSO_20260317_143022   # correlation + HTML report
+cirrus enrich  investigations/CONTOSO_20260317_143022   # IP enrichment
+
+# Or extend a triage-only case with full BEC+ATO collection:
+cirrus run bec-ato --tenant contoso.com --existing-case investigations/CONTOSO_20260317_143022
 ```
 
 **Interactive wizard (no flags needed — CIRRUS prompts for everything):**
@@ -312,27 +323,35 @@ cirrus auth cleanup --tenant contoso.com
 
 ### Quick Triage
 
-Runs 8 targeted checks on a suspected compromised account **in parallel**. No case folder is created — results display directly in the terminal in seconds. Use this for rapid first-look assessment before deciding whether to run a full workflow.
+Runs 8 targeted checks on a suspected compromised account **in parallel** and creates a **handoff package** — a timestamped case folder containing structured findings and raw evidence ready for the cyber team or SIEM ingestion.
 
 **Checks (all run simultaneously):**
 
-| Check | What it looks for |
-|---|---|
-| Sign-in activity | Unusual countries, impossible travel, device code/ROPC, legacy auth, risk signals |
-| MFA methods | Recently added methods, FIDO2 keys, external email OTP, multiple authenticator apps |
-| Inbox rules | Forwarding rules, permanent delete, hidden-folder rules, finance keywords |
-| Mail forwarding | External SMTP forward, no-local-copy configuration |
-| OAuth grants | High-risk scopes (Mail.Read, Files.ReadWrite.All, full_access_as_user, etc.) |
-| Registered devices | Recently registered, personal/BYOD devices |
-| Directory audit | MFA changes, admin password resets, role assignments in the window |
-| Identity Protection | Risk state and risk level (skipped gracefully if no Entra ID P2) |
+| Check | What it looks for | Output file |
+|---|---|---|
+| Sign-in activity | Unusual countries, impossible travel, device code/ROPC, legacy auth, risk signals | `triage_sign_ins` |
+| MFA methods | Recently added methods, FIDO2 keys, external email OTP, multiple authenticator apps | `triage_mfa_methods` |
+| Inbox rules | Forwarding rules, permanent delete, hidden-folder rules, finance keywords | `triage_inbox_rules` |
+| Mail forwarding | External SMTP forward, no-local-copy configuration | `triage_mail_forwarding` |
+| OAuth grants | High-risk scopes (Mail.Read, Files.ReadWrite.All, full_access_as_user, etc.) | `triage_oauth_grants` |
+| Registered devices | Recently registered, personal/BYOD devices | `triage_devices` |
+| Directory audit | MFA changes, admin password resets, role assignments in the window | `triage_audit_activity` |
+| Identity Protection | Risk state and risk level (skipped gracefully if no Entra ID P2) | `triage_risky_status` |
+
+Each check writes `.json`, `.csv`, and `.ndjson` (SOF-ELK / JSON Lines format) to the case folder. `triage_report.json` contains the full structured findings with verdict, flags, and check results for every user.
 
 ```bash
-# Single user, last 7 days (default)
+# Single user — creates case folder with triage evidence package
 cirrus triage --tenant contoso.com --user john@contoso.com
 
 # Wider window
 cirrus triage --tenant contoso.com --user john@contoso.com --days 14
+
+# Triage + full BEC+ATO collection in one command (complete handoff package)
+cirrus triage --tenant contoso.com --user john@contoso.com --workflow
+
+# Triage + collection, skip correlation (collect-only handoff — cyber team analyzes)
+cirrus triage --tenant contoso.com --user john@contoso.com --workflow --collect-only
 
 # Multiple users
 cirrus triage --tenant contoso.com --users john@contoso.com --users jane@contoso.com
@@ -340,11 +359,38 @@ cirrus triage --tenant contoso.com --users john@contoso.com --users jane@contoso
 # From a file (one UPN per line, # comments ignored)
 cirrus triage --tenant contoso.com --users-file suspects.txt
 
-# Interactive wizard
+# Interactive wizard — prompts for all inputs; offers to run BEC+ATO if verdict is HIGH/WARN
 cirrus triage
 ```
 
-**Sample output:**
+**Handoff workflow:**
+
+| Role | Command |
+|---|---|
+| Helpdesk — quick triage only | `cirrus triage --tenant contoso.com --user john@contoso.com` |
+| Helpdesk — full package | `cirrus triage --tenant contoso.com --user john@contoso.com --workflow` |
+| Cyber — extend triage case | `cirrus run bec-ato --tenant contoso.com --existing-case investigations/CASE_DIR/` |
+| Cyber — correlation + report | `cirrus analyze investigations/CASE_DIR/` |
+| Cyber — IP enrichment | `cirrus enrich investigations/CASE_DIR/` |
+
+**Case folder contents after triage:**
+```
+CONTOSO_20260317_143022/
+├── case_audit.jsonl          ← tamper-evident chain-of-custody (SHA-256 chained)
+├── case_audit.txt            ← human-readable audit log
+├── triage_report.json        ← structured findings: verdict, flags, checks per user
+├── triage_sign_ins.json/.csv/.ndjson
+├── triage_mfa_methods.json/.csv/.ndjson
+├── triage_inbox_rules.json/.csv/.ndjson
+├── triage_mail_forwarding.json/.csv/.ndjson
+├── triage_oauth_grants.json/.csv/.ndjson
+├── triage_devices.json/.csv/.ndjson
+├── triage_audit_activity.json/.csv/.ndjson
+└── triage_risky_status.json/.csv/.ndjson
+```
+With `--workflow`, the full BEC+ATO collector outputs are added to the same folder.
+
+**Sample terminal output:**
 ```
   ✗  Sign-in activity    HIGH    8 sign-ins · 2 countries · 1 suspicious
        → IMPOSSIBLE_TRAVEL:US->RU:1.2h
@@ -359,8 +405,15 @@ cirrus triage
   ⚠  Directory audit     WARN    MFA_METHOD_ADDED, ADMIN_PASSWORD_RESET
   –  Identity Protection SKIP    Requires Entra ID P2
 
-╭─ HIGH RISK — 4/7 checks flagged ──────────────────────────────────────────╮
-│  Recommended: cirrus run ato --tenant contoso.com --user john@contoso.com  │
+  john@contoso.com  Verdict: HIGH RISK  4/7 checks flagged
+
+╭─ Triage Complete — Handoff Package Ready ─────────────────────────────────╮
+│  Overall verdict: HIGH RISK                                                │
+│  Case folder:     investigations/CONTOSO_20260317_143022                   │
+│                                                                            │
+│  To add full BEC+ATO collection, the cyber team can run:                   │
+│    cirrus run bec-ato --tenant contoso.com \                               │
+│      --existing-case investigations/CONTOSO_20260317_143022                │
 ╰────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -605,20 +658,23 @@ cirrus run full --tenant contoso.com --users-file vip_users.txt
 | | Triage | BEC | ATO | BEC+ATO | Full |
 |--|:------:|-----|-----|---------|------|
 | Users | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Sign-in logs | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Entra audit logs | ✓ | ✓ | ✓ | ✓ | ✓ |
-| MFA methods | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Risky users / sign-ins | | ✓ | ✓ | ✓ | ✓ |
+| Sign-in logs | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
+| Entra audit logs | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
+| MFA methods | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
+| Risky users / sign-ins | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
 | Conditional Access | | | ✓ | ✓ | ✓ |
-| Registered devices | ✓ | | ✓ | ✓ | |
-| OAuth grants | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Registered devices | ✓ ¹ | | ✓ | ✓ | |
+| OAuth grants | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
 | App registrations | | | ✓ | ✓ | |
-| Mailbox rules | ✓ | ✓ | | ✓ | ✓ |
-| Mail forwarding | ✓ | ✓ | | ✓ | ✓ |
+| Mailbox rules | ✓ ¹ | ✓ | | ✓ | ✓ |
+| Mail forwarding | ✓ ¹ | ✓ | | ✓ | ✓ |
 | UAL | | ✓ | ✓ | ✓ | ✓ |
 | Service principals | | | | | ✓ |
-| Case folder / files | | ✓ | ✓ | ✓ | ✓ |
-| Correlation + HTML report | | optional | optional | optional | optional |
+| Case folder / files | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Correlation + HTML report | optional ² | optional | optional | optional | optional |
+
+¹ Triage collects a limited snapshot (up to 50 records per check) — sufficient for verdict, not full forensic depth. Use `--workflow` or `cirrus run bec-ato --existing-case` for complete paginated collection.
+² With `--workflow`, triage runs correlation automatically; without it, run `cirrus analyze <case_dir>` manually.
 
 ---
 
@@ -1088,6 +1144,7 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 - [x] IP enrichment (`cirrus enrich`) — geo/ASN/hosting/proxy/Tor via ip-api.com + optional AbuseIPDB abuse scoring
 - [x] Blast radius assessment (`cirrus blast-radius`) — 6 parallel Graph API checks mapping account access footprint
 - [x] Additional correlation rules: password spray, mass mail access, hosting-provider sign-in (11 rules total)
+- [x] Triage handoff package — `cirrus triage` now creates a case folder with SIEM-ready NDJSON per check, `triage_report.json` (structured verdict + flags), and chain-of-custody audit log; `--workflow` adds full BEC+ATO collection in the same pass; `cirrus run bec/ato/bec-ato` accept `--existing-case` to extend a triage case
 - [x] Quick triage command (`cirrus triage`) — 8 parallel checks, results in seconds
 - [x] HTML investigation report (`investigation_report.html`) — self-contained, print-friendly, offline-capable, with IP enrichment tab
 - [x] Cross-collector correlation engine (auto-runs after every workflow)
