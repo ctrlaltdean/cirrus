@@ -2365,42 +2365,15 @@ def analyze(
         raise typer.Exit(1)
 
     from cirrus.analysis.correlator import run_correlator
+    from cirrus.workflows.base import render_findings
     console.print(f"\n[bold]Running correlation engine on:[/bold] {case_dir}\n")
 
     report = run_correlator(case_dir)
-    summary = report["summary"]
-    findings = report["findings"]
 
     loaded = ", ".join(report.get("collectors_loaded") or [])
     console.print(f"[dim]Collectors loaded:[/dim] {loaded or 'none'}\n")
 
-    if not findings:
-        console.print("[green]No cross-collector findings.[/green]")
-    else:
-        table = Table(
-            title="Cross-Collector Findings",
-            border_style="bright_blue",
-            header_style="bold magenta",
-        )
-        table.add_column("ID", style="dim", width=10)
-        table.add_column("Sev", width=8)
-        table.add_column("User", style="cyan")
-        table.add_column("Title")
-
-        severity_style = {"high": "red", "medium": "yellow", "low": "dim"}
-        for f in findings:
-            sev = f["severity"]
-            sev_label = f"[{severity_style.get(sev, 'white')}]{sev.upper()}[/{severity_style.get(sev, 'white')}]"
-            table.add_row(f["id"], sev_label, f.get("user") or "—", f["title"])
-
-        console.print(table)
-        console.print(
-            f"\n[bold]Total:[/bold] {summary['total_findings']} finding(s)  "
-            f"[red]{summary.get('high', 0)} HIGH[/red]  "
-            f"[yellow]{summary.get('medium', 0)} MEDIUM[/yellow]\n"
-            f"[bold]JSON:[/bold]   {case_dir / 'ioc_correlation.json'}\n"
-            f"[bold]Text:[/bold]   {case_dir / 'ioc_correlation.txt'}\n"
-        )
+    render_findings(report)
 
     # Always generate HTML report
     from cirrus.analysis.report import generate_report

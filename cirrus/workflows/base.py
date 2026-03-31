@@ -262,6 +262,81 @@ class BaseWorkflow:
         raise NotImplementedError
 
 
+def render_findings(report: dict) -> None:
+    """
+    Print correlation findings to the terminal.
+
+    Shows a table of all findings (ID, severity, user, title) and expands
+    HIGH-severity findings with their description and evidence summary.
+    Called by both _run_correlation (end of workflow) and cirrus analyze.
+    """
+    from rich.panel import Panel
+
+    findings = report.get("findings") or []
+    summary  = report.get("summary") or {}
+
+    if not findings:
+        console.print("[bold]Correlation:[/bold] [green]No cross-collector findings.[/green]")
+        return
+
+    high_count   = summary.get("high", 0)
+    medium_count = summary.get("medium", 0)
+    total        = summary.get("total_findings", len(findings))
+
+    severity_style = {"high": "red", "medium": "yellow", "low": "dim"}
+
+    table = Table(
+        title=f"\n[bold]Cross-Collector Findings[/bold]",
+        border_style="bright_blue",
+        header_style="bold magenta",
+        show_lines=False,
+    )
+    table.add_column("ID",       style="dim",   width=10, no_wrap=True)
+    table.add_column("Sev",      width=8,       no_wrap=True)
+    table.add_column("User",     style="cyan",  min_width=24)
+    table.add_column("Title")
+
+    for f in findings:
+        sev = f.get("severity", "")
+        sty = severity_style.get(sev, "white")
+        table.add_row(
+            f.get("id", "")[:10],
+            f"[{sty}]{sev.upper()}[/{sty}]",
+            f.get("user") or "—",
+            f.get("title", ""),
+        )
+
+    console.print(table)
+
+    # Expand HIGH findings with description + evidence
+    high_findings = [f for f in findings if f.get("severity") == "high"]
+    if high_findings:
+        console.print("\n[bold red]HIGH findings — detail:[/bold red]")
+        for f in high_findings:
+            console.print(f"\n  [bold cyan]{f.get('id','')}[/bold cyan]  {f.get('title','')}")
+            desc = f.get("description", "")
+            if desc:
+                # Print up to 3 sentences of description
+                sentences = desc.replace("\n", " ").split(". ")
+                console.print(f"  [dim]{'. '.join(sentences[:3]).strip()}[/dim]")
+            evidence = f.get("evidence") or []
+            for ev in evidence[:3]:
+                ev_desc = ev.get("description", "")
+                ev_ts   = ev.get("timestamp", "")[:19]
+                if ev_desc:
+                    console.print(f"    [red]→[/red] {ev_desc}" + (f"  [dim]{ev_ts}[/dim]" if ev_ts else ""))
+            techniques = f.get("mitre_techniques") or []
+            if techniques:
+                console.print(f"    [dim]ATT&CK: {', '.join(techniques[:3])}[/dim]")
+
+    console.print(
+        f"\n[bold]Total:[/bold] {total} finding(s)  "
+        f"[red]{high_count} HIGH[/red]  "
+        f"[yellow]{medium_count} MEDIUM[/yellow]\n"
+        f"[dim]Full detail: ioc_correlation.txt[/dim]"
+    )
+
+
 def _run_correlation(case_dir: Path, result: "WorkflowResult", case: "Case") -> None:
     """
     Run the cross-collector correlation engine and log the result.
@@ -284,22 +359,16 @@ def _run_correlation(case_dir: Path, result: "WorkflowResult", case: "Case") -> 
             },
         )
 
-        if finding_count > 0:
-            label = f"[red]{finding_count}[/red]" if high_count > 0 else f"[yellow]{finding_count}[/yellow]"
-            console.print(
-                f"\n[bold]Correlation:[/bold] {label} cross-collector finding(s) — "
-                f"see [cyan]ioc_correlation.json[/cyan] / [cyan]ioc_correlation.txt[/cyan]"
-            )
-        else:
-            console.print("\n[bold]Correlation:[/bold] [green]No cross-collector findings.[/green]")
+        console.print()
+        render_findings(report)
 
         # HTML report
         try:
             from cirrus.analysis.report import generate_report
             report_path = generate_report(case_dir)
-            console.print(f"[bold]Report:[/bold]      [cyan]{report_path}[/cyan]")
+            console.print(f"[bold]Report:[/bold]  [cyan]{report_path}[/cyan]\n")
         except Exception as exc:
-            console.print(f"\n[dim]HTML report skipped: {exc}[/dim]")
+            console.print(f"[dim]HTML report skipped: {exc}[/dim]")
 
     except Exception as exc:
         console.print(f"\n[dim]Correlation skipped: {exc}[/dim]")
