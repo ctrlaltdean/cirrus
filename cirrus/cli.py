@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import sys
 import time as _time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Optional
@@ -63,6 +63,7 @@ from cirrus.utils.deps import (
     check_all,
     install_all_missing,
 )
+from cirrus.utils.helpers import file_sha256
 from cirrus.utils.updater import apply_update, check_for_update, is_frozen
 from cirrus.workflows.ato import ATOWorkflow
 from cirrus.workflows.base import render_summary
@@ -168,6 +169,7 @@ BenchmarkOpt = Annotated[Optional[str], typer.Option("--benchmark", "-b", help="
 LevelOpt = Annotated[Optional[str], typer.Option("--level", "-l", help="CIS levels: 1, 2, or all. Omit to use the wizard.")]
 OptionalTenantOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help="Tenant domain or GUID. Prompted if omitted.")]
 CollectOnlyOpt = Annotated[bool, typer.Option("--collect-only", help="Collect evidence only — skip correlation analysis and HTML report. Fastest option when you know exactly what you need.")]
+ExistingCaseOpt = Annotated[Optional[Path], typer.Option("--existing-case", help="Continue collection into an existing case folder instead of creating a new one.")]
 
 _DATE_FMT = "%Y-%m-%d"
 # Maximum UAL retention periods (informational — shown in the wizard).
@@ -729,6 +731,7 @@ def run_bec(
     all_users: AllUsersOpt = False,
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
+    existing_case: ExistingCaseOpt = None,
 ) -> None:
     """
     [bold]BEC Investigation Workflow[/bold]
@@ -780,9 +783,16 @@ def run_bec(
 
     token, _ = _authenticate(tenant, client_id)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    case = Case.create(tenant, output_dir, case_name)
-    console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
+    if existing_case:
+        if not existing_case.exists():
+            console.print(f"[red]Existing case not found:[/red] {existing_case}")
+            raise typer.Exit(1)
+        case = Case.open_existing(existing_case)
+        console.print(f"[bold]Continuing case:[/bold] {case.case_dir}\n")
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        case = Case.create(tenant, output_dir, case_name)
+        console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
 
     case.audit.log_event("WORKFLOW_CONFIG", {
         "workflow": "bec",
@@ -826,6 +836,7 @@ def run_ato(
     all_users: AllUsersOpt = False,
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
+    existing_case: ExistingCaseOpt = None,
 ) -> None:
     """
     [bold]Account Takeover (ATO) Investigation Workflow[/bold]
@@ -883,9 +894,16 @@ def run_ato(
 
     token, _ = _authenticate(tenant, client_id)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    case = Case.create(tenant, output_dir, case_name)
-    console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
+    if existing_case:
+        if not existing_case.exists():
+            console.print(f"[red]Existing case not found:[/red] {existing_case}")
+            raise typer.Exit(1)
+        case = Case.open_existing(existing_case)
+        console.print(f"[bold]Continuing case:[/bold] {case.case_dir}\n")
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        case = Case.create(tenant, output_dir, case_name)
+        console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
 
     case.audit.log_event("WORKFLOW_CONFIG", {
         "workflow": "ato",
@@ -929,6 +947,7 @@ def run_bec_ato(
     all_users: AllUsersOpt = False,
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
+    existing_case: ExistingCaseOpt = None,
 ) -> None:
     """
     [bold]BEC + ATO Combined Investigation Workflow[/bold]
@@ -984,9 +1003,16 @@ def run_bec_ato(
 
     token, _ = _authenticate(tenant, client_id)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    case = Case.create(tenant, output_dir, case_name)
-    console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
+    if existing_case:
+        if not existing_case.exists():
+            console.print(f"[red]Existing case not found:[/red] {existing_case}")
+            raise typer.Exit(1)
+        case = Case.open_existing(existing_case)
+        console.print(f"[bold]Continuing case:[/bold] {case.case_dir}\n")
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        case = Case.create(tenant, output_dir, case_name)
+        console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
 
     case.audit.log_event("WORKFLOW_CONFIG", {
         "workflow": "bec-ato",
@@ -1652,43 +1678,52 @@ def case_list(
 # Triage command  (quick per-user checks, no case folder)
 # ---------------------------------------------------------------------------
 
-TenantOpt  = Annotated[Optional[str], typer.Option("--tenant",  help="Tenant domain or GUID.")]
-DaysTriOpt = Annotated[int,           typer.Option("--days",    help="How many days back to check (default 7).")]
+DaysTriOpt = Annotated[int, typer.Option("--days", help="How many days back to check (default 7).")]
 
 
 @app.command("triage")
 def triage(
-    tenant: TenantOpt = None,
-    user:   Annotated[Optional[str], typer.Option("--user",  help="UPN of the suspected compromised account.")] = None,
-    users:  Annotated[Optional[list[str]], typer.Option("--users", help="Multiple UPNs (repeat flag).")] = None,
-    users_file: Annotated[Optional[Path], typer.Option("--users-file", help="File with one UPN per line.")] = None,
-    days:   DaysTriOpt = 7,
+    tenant:     TenantRunOpt = None,
+    user:       Annotated[Optional[str],       typer.Option("--user",       help="UPN of the suspected compromised account.")] = None,
+    users:      Annotated[Optional[list[str]], typer.Option("--users",      help="Multiple UPNs (repeat flag).")] = None,
+    users_file: Annotated[Optional[Path],      typer.Option("--users-file", help="File with one UPN per line.")] = None,
+    days:       DaysTriOpt = 7,
+    run_workflow: Annotated[bool, typer.Option("--workflow", "-w", help="After triage, run the full BEC+ATO collection workflow into the same case folder.")] = False,
+    collect_only: CollectOnlyOpt = False,
+    output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
+    case_name:  CaseNameOpt = None,
+    client_id:  ClientIdOpt = None,
 ) -> None:
     """
-    Run quick targeted checks on a suspected compromised account.
+    [bold]Triage + Handoff Package[/bold]
 
-    Checks MFA methods, inbox rules, mail forwarding, OAuth grants, registered
-    devices, sign-in locations, directory audit changes, and Identity Protection
-    risk — all in parallel. Results display immediately. No case folder created.
+    Runs 8 high-signal checks on a suspected compromised account (MFA methods,
+    inbox rules, mail forwarding, OAuth grants, registered devices, sign-in
+    locations, directory audit changes, Identity Protection risk) — all in
+    parallel.
 
-    Use this for fast first-look triage before committing to a full workflow run.
+    Creates a case folder containing:
+      • triage_report.json       — structured findings (verdict, flags, checks)
+      • triage_<check>.json/csv/ndjson  — raw API records per check (SIEM-ready)
+      • case_audit.jsonl         — tamper-evident chain-of-custody log
+
+    Add [bold]--workflow[/bold] to also run the full BEC+ATO collection into the
+    same case folder so the handoff package is complete for the cyber team.
 
     \\b
     Examples:
         cirrus triage --tenant contoso.com --user john@contoso.com
-        cirrus triage --tenant contoso.com --user john@contoso.com --days 14
-        cirrus triage --tenant contoso.com --users-file suspects.txt
+        cirrus triage --tenant contoso.com --user john@contoso.com --days 14 --workflow
+        cirrus triage --tenant contoso.com --users-file suspects.txt --workflow --collect-only
     """
-    from rich.table import Table as RichTable
-    from rich.panel import Panel as RichPanel
-
     _banner()
 
     # ── Tenant & auth ──────────────────────────────────────────────────────
-    if tenant is None:
+    interactive = tenant is None
+    if interactive:
         tenant = _prompt_tenant()
 
-    token, username = _authenticate(tenant)
+    token, username = _authenticate(tenant, client_id)
 
     # ── Resolve user list ──────────────────────────────────────────────────
     target_users: list[str] = []
@@ -1720,40 +1755,146 @@ def triage(
 
     if not target_users:
         while True:
-            upn = Prompt.ask(
+            upn_input = Prompt.ask(
                 "\n[bold]Target user[/bold] [dim](the account's sign-in email, e.g. john@contoso.com)[/dim]"
             ).strip()
-            err = _validate_upn(upn)
+            err = _validate_upn(upn_input)
             if err:
                 console.print(f"[red]Invalid UPN:[/red] {err}")
             else:
-                target_users = [upn]
+                target_users = [upn_input]
                 break
 
     target_users = list(dict.fromkeys(target_users))  # deduplicate, preserve order
 
-    # ── Run triage for each user ───────────────────────────────────────────
+    # ── Create case folder ─────────────────────────────────────────────────
+    output_dir.mkdir(parents=True, exist_ok=True)
+    case = Case.create(tenant, output_dir, case_name)
+    console.print(f"\n[bold]Case folder:[/bold] {case.case_dir}\n")
+    case.audit.log_event("TRIAGE_START", {
+        "analyst": username,
+        "tenant": tenant,
+        "users": target_users,
+        "days": days,
+        "workflow": run_workflow,
+    })
+
+    # ── Run triage checks for each user ────────────────────────────────────
     from cirrus.analysis.triage import run_triage
+    from collections import defaultdict as _defaultdict
+
+    all_reports = []
+    all_raw: dict[str, list[dict]] = _defaultdict(list)
 
     for upn in target_users:
         console.print(
-            f"\n[bold]Running triage:[/bold]  {upn}  "
+            f"[bold]Running triage:[/bold]  {upn}  "
             f"[dim](last {days} day{'s' if days != 1 else ''})[/dim]\n"
         )
 
-        with console.status(f"[dim]Running {8} checks in parallel...[/dim]"):
-            report = run_triage(token=token, upn=upn, days=days)
+        with console.status(f"[dim]Running 8 checks in parallel...[/dim]"):
+            report, raw_records = run_triage(token=token, upn=upn, days=days)
+
+        all_reports.append(report)
+        for check_key, records in raw_records.items():
+            all_raw[check_key].extend(records)
 
         _render_triage_report(report)
 
         if len(target_users) > 1:
             console.print()
 
+    # ── Save raw check data to case folder ─────────────────────────────────
+    from cirrus.output.writer import save_collection
+
+    console.print("\n[dim]Saving triage evidence to case folder...[/dim]")
+    for check_key, records in all_raw.items():
+        if not records:
+            continue
+        json_path, csv_path, ndjson_path, json_hash, csv_hash, ndjson_hash = save_collection(
+            records, case.case_dir, f"triage_{check_key}"
+        )
+        case.audit.log_collection_complete(
+            f"triage_{check_key}", len(records), json_path, json_hash
+        )
+
+    # ── Save structured triage_report.json ────────────────────────────────
+    import json as _json
+    triage_report_data = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "analyst": username,
+        "tenant": tenant,
+        "days": days,
+        "users_triaged": target_users,
+        "overall_verdict": max(
+            (r.verdict for r in all_reports),
+            key=lambda v: {"high": 3, "warn": 2, "clean": 1}.get(v, 0),
+            default="clean",
+        ),
+        "workflow_run": False,  # updated below if workflow runs
+        "reports": [asdict(r) for r in all_reports],
+    }
+    report_path = case.case_dir / "triage_report.json"
+    report_path.write_text(
+        _json.dumps(triage_report_data, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    case.audit.log_event("TRIAGE_REPORT_WRITTEN", {
+        "file": str(report_path),
+        "file_hash": file_sha256(report_path),
+        "users_triaged": target_users,
+        "overall_verdict": triage_report_data["overall_verdict"],
+    })
+
+    # ── Optionally run BEC+ATO workflow ────────────────────────────────────
+    overall_verdict = triage_report_data["overall_verdict"]
+    should_run_workflow = run_workflow
+    if not should_run_workflow and interactive and overall_verdict in ("high", "warn"):
+        console.print()
+        should_run_workflow = Confirm.ask(
+            f"[bold]Verdict is {overall_verdict.upper()} — run full BEC+ATO collection now?[/bold]",
+            default=True,
+        )
+
+    if should_run_workflow:
+        console.print(f"\n[bold magenta]Running BEC+ATO workflow...[/bold magenta]\n")
+        start_dt = datetime.now(timezone.utc) - timedelta(days=days)
+        end_dt   = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=0)
+        _client_id = client_id
+        token_provider = lambda: get_token(tenant, **({'client_id': _client_id} if _client_id else {}))
+        bec_ato = BECATOWorkflow(token, case, token_provider=token_provider)
+        wf_result = bec_ato.run(
+            users=target_users,
+            tenant=tenant,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            run_analysis=not collect_only,
+        )
+        render_summary(wf_result)
+        if wf_result.errors:
+            console.print(f"[yellow]⚠ {len(wf_result.errors)} collector(s) encountered errors.[/yellow]")
+        # Update workflow_run flag in triage_report.json
+        triage_report_data["workflow_run"] = True
+        report_path.write_text(
+            _json.dumps(triage_report_data, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+
+    case.audit.log_event("TRIAGE_COMPLETE", {"overall_verdict": overall_verdict})
+    case.close()
+
+    # ── Final handoff summary ──────────────────────────────────────────────
+    _render_triage_handoff(
+        case_dir=case.case_dir,
+        tenant=tenant,
+        reports=all_reports,
+        workflow_ran=should_run_workflow,
+        collect_only=collect_only,
+    )
+
 
 def _render_triage_report(report: "TriageReport") -> None:
-    """Render a triage report to the terminal using Rich."""
-    from cirrus.analysis.triage import TriageReport
-
+    """Render one user's triage results to the terminal."""
     STATUS_ICON  = {"high": "[red]✗[/red]",   "warn": "[yellow]⚠[/yellow]",
                     "clean": "[green]✓[/green]", "error": "[dim]![/dim]",
                     "skipped": "[dim]–[/dim]"}
@@ -1794,31 +1935,85 @@ def _render_triage_report(report: "TriageReport") -> None:
                 ) else "yellow"
                 console.print(f"    [{color}]→[/{color}] {line}")
 
-    # Verdict
+    # Per-user verdict line
     verdict = report.verdict
     flagged = report.flagged_count
     total   = len([c for c in report.checks if c.status != "skipped"])
-
     console.print()
     if verdict == "high":
-        verdict_str = f"[bold red]HIGH RISK[/bold red]"
+        verdict_str = "[bold red]HIGH RISK[/bold red]"
     elif verdict == "warn":
-        verdict_str = f"[bold yellow]SUSPICIOUS[/bold yellow]"
+        verdict_str = "[bold yellow]SUSPICIOUS[/bold yellow]"
     else:
-        verdict_str = f"[bold green]CLEAN[/bold green]"
+        verdict_str = "[bold green]CLEAN[/bold green]"
+    console.print(
+        f"  [bold]{report.user}[/bold]  Verdict: {verdict_str}  "
+        f"[dim]{flagged}/{total} checks flagged[/dim]"
+    )
+
+
+def _render_triage_handoff(
+    case_dir: "Path",
+    tenant: str,
+    reports: list,
+    workflow_ran: bool,
+    collect_only: bool,
+) -> None:
+    """Print the final handoff panel after all triage work is done."""
+    overall = max(
+        (r.verdict for r in reports),
+        key=lambda v: {"high": 3, "warn": 2, "clean": 1}.get(v, 0),
+        default="clean",
+    )
+    if overall == "high":
+        border = "red"
+        verdict_str = "[bold red]HIGH RISK[/bold red]"
+    elif overall == "warn":
+        border = "yellow"
+        verdict_str = "[bold yellow]SUSPICIOUS[/bold yellow]"
+    else:
+        border = "green"
+        verdict_str = "[bold green]CLEAN[/bold green]"
+
+    lines: list[str] = [
+        f"[bold]Overall verdict:[/bold] {verdict_str}",
+        f"[bold]Case folder:[/bold]     [cyan]{case_dir}[/cyan]",
+        "",
+    ]
+
+    if workflow_ran and not collect_only:
+        lines += [
+            "[dim]The case folder contains triage evidence + full BEC+ATO collection.[/dim]",
+            "[dim]Hand off the case folder to your cyber team. They can run:[/dim]",
+            "",
+            f"  [cyan]cirrus analyze {case_dir}[/cyan]",
+            f"  [cyan]cirrus enrich {case_dir}[/cyan]",
+            f"  [cyan]cirrus enrich-domains {case_dir}[/cyan]",
+        ]
+    elif workflow_ran and collect_only:
+        lines += [
+            "[dim]The case folder contains triage evidence + full BEC+ATO collection.[/dim]",
+            "[dim]Correlation was skipped (--collect-only). The cyber team can run:[/dim]",
+            "",
+            f"  [cyan]cirrus analyze {case_dir}[/cyan]",
+            f"  [cyan]cirrus enrich {case_dir}[/cyan]",
+        ]
+    else:
+        lines += [
+            "[dim]The case folder contains quick triage evidence (limited record counts).[/dim]",
+            "[dim]To add full BEC+ATO collection, the cyber team can run:[/dim]",
+            "",
+            f"  [cyan]cirrus run bec-ato --tenant {tenant} --existing-case {case_dir}[/cyan]",
+            "",
+            "[dim]Or to just re-run correlation on what's already collected:[/dim]",
+            f"  [cyan]cirrus analyze {case_dir}[/cyan]",
+        ]
 
     console.print(
         Panel(
-            f"[bold]User:[/bold] {report.user}   "
-            f"[bold]Window:[/bold] last {report.days} days   "
-            f"[bold]Verdict:[/bold] {verdict_str}   "
-            f"[dim]{flagged}/{total} checks flagged[/dim]"
-            + (
-                f"\n\n[dim]Recommended next step:[/dim]\n"
-                f"  [cyan]cirrus run ato --tenant <tenant> --user {report.user} --days 30[/cyan]"
-                if verdict in ("high", "warn") else ""
-            ),
-            border_style="red" if verdict == "high" else ("yellow" if verdict == "warn" else "green"),
+            "\n".join(lines),
+            title="[bold]Triage Complete — Handoff Package Ready[/bold]",
+            border_style=border,
             expand=False,
         )
     )

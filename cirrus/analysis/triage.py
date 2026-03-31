@@ -2,9 +2,9 @@
 Quick Triage Engine
 
 Runs a focused set of high-signal checks against a single user (or a small
-list of users) and reports results directly to the terminal. No case folder,
-no file output — designed for rapid first-look assessment before committing
-to a full investigation workflow.
+list of users) and reports results directly to the terminal.  Every check
+also returns the raw API records it fetched so the caller can write them to
+a case folder for downstream analysis.
 
 Checks (run in parallel):
   sign_ins        — recent authentications: locations, protocols, risk signals
@@ -16,7 +16,11 @@ Checks (run in parallel):
   audit_activity  — directory audit: MFA changes, password resets, role assigns
   risky_status    — Identity Protection risk state (best-effort, skips on no P2)
 
-Each check returns a CheckResult with one of five status levels:
+Each check returns a (CheckResult, list[dict]) tuple:
+  CheckResult — status, summary, flags for terminal display and triage_report.json
+  list[dict]  — raw Graph API records for writing to the case folder / SIEM
+
+CheckResult status levels:
   clean    — nothing suspicious found
   warn     — medium-severity flags
   high     — high-severity flags (immediate attention warranted)
@@ -176,7 +180,9 @@ def _is_private_ip(ip: str) -> bool:
 
 # ── Individual checks ──────────────────────────────────────────────────────────
 
-def _check_sign_ins(session: requests.Session, upn: str, start_dt: datetime) -> CheckResult:
+def _check_sign_ins(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
     label = "Sign-in activity"
     try:
         params = {
@@ -189,12 +195,12 @@ def _check_sign_ins(session: requests.Session, upn: str, start_dt: datetime) -> 
         }
         records = _collect_all(session, f"{GRAPH_BASE}/auditLogs/signIns", params)
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires Entra ID P1 / AuditLog.Read.All")
+        return CheckResult(label, "skipped", "Requires Entra ID P1 / AuditLog.Read.All"), []
     except Exception as exc:
-        return CheckResult(label, "error", str(exc)[:120])
+        return CheckResult(label, "error", str(exc)[:120]), []
 
     if not records:
-        return CheckResult(label, "clean", f"No sign-ins in last {_days_label(start_dt)}")
+        return CheckResult(label, "clean", f"No sign-ins in last {_days_label(start_dt)}"), records
 
     flags: list[str] = []
     countries: set[str] = set()
@@ -258,7 +264,7 @@ def _check_sign_ins(session: requests.Session, upn: str, start_dt: datetime) -> 
 
     # Deduplicate flags
     flags = list(dict.fromkeys(flags))
-    status = _flag_status(flags)
+    check_status = _flag_status(flags)
 
     country_str = ", ".join(sorted(countries)[:5])
     summary = (
@@ -275,10 +281,12 @@ def _check_sign_ins(session: requests.Session, upn: str, start_dt: datetime) -> 
     if public_ips:
         detail.append(f"Public IPs: {', '.join(public_ips[:4])}")
 
-    return CheckResult(label, status, summary, detail, flags)
+    return CheckResult(label, check_status, summary, detail, flags), records
 
 
-def _check_mfa_methods(session: requests.Session, upn: str, start_dt: datetime) -> CheckResult:
+def _check_mfa_methods(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
     label = "MFA methods"
     try:
         methods = _collect_all(
@@ -286,12 +294,12 @@ def _check_mfa_methods(session: requests.Session, upn: str, start_dt: datetime) 
             f"{GRAPH_BASE}/users/{upn}/authentication/methods",
         )
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires UserAuthenticationMethod.Read.All")
+        return CheckResult(label, "skipped", "Requires UserAuthenticationMethod.Read.All"), []
     except Exception as exc:
-        return CheckResult(label, "error", str(exc)[:120])
+        return CheckResult(label, "error", str(exc)[:120]), []
 
     if not methods:
-        return CheckResult(label, "warn", "No authentication methods found — account has no MFA")
+        return CheckResult(label, "warn", "No authentication methods found — account has no MFA"), methods
 
     flags: list[str] = []
     type_counts: dict[str, int] = defaultdict(int)
@@ -329,7 +337,7 @@ def _check_mfa_methods(session: requests.Session, upn: str, start_dt: datetime) 
         flags.append(f"MULTIPLE_PHONE_NUMBERS:{type_counts['phone']}")
 
     flags = list(dict.fromkeys(flags))
-    status = _flag_status(flags) if flags else "clean"
+    check_status = _flag_status(flags) if flags else "clean"
 
     type_summary = ", ".join(f"{k}×{v}" if v > 1 else k for k, v in type_counts.items())
     summary = f"{len(methods)} method(s): {type_summary}"
@@ -337,10 +345,12 @@ def _check_mfa_methods(session: requests.Session, upn: str, start_dt: datetime) 
         summary += f" — NEW: {', '.join(recently_added)}"
 
     detail = list(dict.fromkeys(flags))
-    return CheckResult(label, status, summary, detail, flags)
+    return CheckResult(label, check_status, summary, detail, flags), methods
 
 
-def _check_inbox_rules(session: requests.Session, upn: str, start_dt: datetime) -> CheckResult:
+def _check_inbox_rules(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
     label = "Inbox rules"
     try:
         rules = _collect_all(
@@ -348,14 +358,14 @@ def _check_inbox_rules(session: requests.Session, upn: str, start_dt: datetime) 
             f"{GRAPH_BASE}/users/{upn}/mailFolders/inbox/messageRules",
         )
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires MailboxSettings.Read / Mail.Read")
+        return CheckResult(label, "skipped", "Requires MailboxSettings.Read / Mail.Read"), []
     except (FileNotFoundError, ValueError):
-        return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed")
+        return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed"), []
     except Exception as exc:
-        return CheckResult(label, "error", str(exc)[:120])
+        return CheckResult(label, "error", str(exc)[:120]), []
 
     if not rules:
-        return CheckResult(label, "clean", "No inbox rules configured")
+        return CheckResult(label, "clean", "No inbox rules configured"), rules
 
     _HIDDEN = {"deleteditems", "junkemail", "rssfeedsroot", "drafts"}
     _FINANCE_KW = {"invoice", "wire", "payment", "transfer", "bank", "remittance",
@@ -400,34 +410,36 @@ def _check_inbox_rules(session: requests.Session, upn: str, start_dt: datetime) 
                 flags.append(f"SUSPICIOUS_KEYWORD:{kw}")
 
     flags = list(dict.fromkeys(flags))
-    status = _flag_status(flags) if flags else "clean"
+    check_status = _flag_status(flags) if flags else "clean"
 
     summary = f"{len(rules)} rule(s)"
     if suspicious:
         summary += f" — {'; '.join(suspicious[:3])}"
 
-    return CheckResult(label, status, summary, list(dict.fromkeys(flags)), flags)
+    return CheckResult(label, check_status, summary, list(dict.fromkeys(flags)), flags), rules
 
 
-def _check_mail_forwarding(session: requests.Session, upn: str, start_dt: datetime) -> CheckResult:
+def _check_mail_forwarding(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
     label = "Mail forwarding"
     try:
         settings = _get(session, f"{GRAPH_BASE}/users/{upn}/mailboxSettings")
         if not isinstance(settings, dict):
             raise ValueError("Unexpected response")
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires MailboxSettings.Read")
+        return CheckResult(label, "skipped", "Requires MailboxSettings.Read"), []
     except (FileNotFoundError, ValueError):
-        return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed")
+        return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed"), []
     except Exception as exc:
-        return CheckResult(label, "error", str(exc)[:120])
+        return CheckResult(label, "error", str(exc)[:120]), []
 
     fwd_smtp = settings.get("forwardingSmtpAddress") or ""
     fwd_addr = settings.get("forwardingAddress") or ""
     deliver_and_fwd = settings.get("deliverToMailboxAndForward", True)
 
     if not fwd_smtp and not fwd_addr:
-        return CheckResult(label, "clean", "No forwarding configured")
+        return CheckResult(label, "clean", "No forwarding configured"), [settings]
 
     flags: list[str] = []
     upn_domain = upn.split("@")[-1].lower() if "@" in upn else ""
@@ -445,13 +457,15 @@ def _check_mail_forwarding(session: requests.Session, upn: str, start_dt: dateti
     if not deliver_and_fwd:
         flags.append("NO_LOCAL_COPY:victim_receives_nothing")
 
-    status = _flag_status(flags) if flags else "warn"
+    check_status = _flag_status(flags) if flags else "warn"
     dest = fwd_smtp or fwd_addr
     summary = f"Forwarding to: {dest}" + (" (no local copy)" if not deliver_and_fwd else "")
-    return CheckResult(label, status, summary, flags[:], flags)
+    return CheckResult(label, check_status, summary, flags[:], flags), [settings]
 
 
-def _check_oauth_grants(session: requests.Session, upn: str, start_dt: datetime) -> CheckResult:
+def _check_oauth_grants(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
     label = "OAuth grants"
     try:
         grants = _collect_all(
@@ -460,12 +474,12 @@ def _check_oauth_grants(session: requests.Session, upn: str, start_dt: datetime)
             params={"$top": "999"},
         )
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires Directory.Read.All")
+        return CheckResult(label, "skipped", "Requires Directory.Read.All"), []
     except Exception as exc:
-        return CheckResult(label, "error", str(exc)[:120])
+        return CheckResult(label, "error", str(exc)[:120]), []
 
     if not grants:
-        return CheckResult(label, "clean", "No OAuth grants found")
+        return CheckResult(label, "clean", "No OAuth grants found"), grants
 
     flags: list[str] = []
     high_risk: list[str] = []
@@ -479,17 +493,19 @@ def _check_oauth_grants(session: requests.Session, upn: str, start_dt: datetime)
                     flags.append(flag)
                     high_risk.append(scope.strip())
 
-    status = _flag_status(flags) if flags else "clean"
+    check_status = _flag_status(flags) if flags else "clean"
     summary = f"{len(grants)} grant(s)"
     if high_risk:
         summary += f" — high-risk scopes: {', '.join(high_risk[:4])}"
     else:
         summary += " — no high-risk scopes"
 
-    return CheckResult(label, status, summary, flags[:], flags)
+    return CheckResult(label, check_status, summary, flags[:], flags), grants
 
 
-def _check_devices(session: requests.Session, upn: str, start_dt: datetime) -> CheckResult:
+def _check_devices(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
     label = "Registered devices"
     try:
         devices = _collect_all(
@@ -498,12 +514,12 @@ def _check_devices(session: requests.Session, upn: str, start_dt: datetime) -> C
             params={"$select": "id,displayName,operatingSystem,trustType,isManaged,isCompliant,registrationDateTime", "$top": "999"},
         )
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires Directory.Read.All")
+        return CheckResult(label, "skipped", "Requires Directory.Read.All"), []
     except Exception as exc:
-        return CheckResult(label, "error", str(exc)[:120])
+        return CheckResult(label, "error", str(exc)[:120]), []
 
     if not devices:
-        return CheckResult(label, "clean", "No registered devices")
+        return CheckResult(label, "clean", "No registered devices"), devices
 
     flags: list[str] = []
     recently_added: list[str] = []
@@ -527,7 +543,7 @@ def _check_devices(session: requests.Session, upn: str, start_dt: datetime) -> C
             flags.append("UNMANAGED_DEVICE")
 
     flags = list(dict.fromkeys(flags))
-    status = _flag_status(flags) if flags else "clean"
+    check_status = _flag_status(flags) if flags else "clean"
 
     dev_names = ", ".join(
         d.get("displayName") or d.get("operatingSystem") or "unknown"
@@ -537,10 +553,12 @@ def _check_devices(session: requests.Session, upn: str, start_dt: datetime) -> C
     if recently_added:
         summary += f" — NEW: {', '.join(recently_added[:2])}"
 
-    return CheckResult(label, status, summary, list(dict.fromkeys(flags)), flags)
+    return CheckResult(label, check_status, summary, list(dict.fromkeys(flags)), flags), devices
 
 
-def _check_audit_activity(session: requests.Session, upn: str, start_dt: datetime) -> CheckResult:
+def _check_audit_activity(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
     label = "Directory audit"
     _MFA_ACTIVITIES = {
         "user registered security info", "user updated security info",
@@ -549,6 +567,7 @@ def _check_audit_activity(session: requests.Session, upn: str, start_dt: datetim
     }
     _RESET_ACTIVITIES = {"reset user password", "change user password"}
 
+    records: list[dict] = []
     try:
         # Filter by targetResources (changes TO this user)
         params = {
@@ -560,7 +579,7 @@ def _check_audit_activity(session: requests.Session, upn: str, start_dt: datetim
         }
         records = _collect_all(session, f"{GRAPH_BASE}/auditLogs/directoryAudits", params)
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires AuditLog.Read.All / Entra ID P1")
+        return CheckResult(label, "skipped", "Requires AuditLog.Read.All / Entra ID P1"), []
     except Exception:
         # Some tenants don't support the targetResources filter — try without
         try:
@@ -578,10 +597,10 @@ def _check_audit_activity(session: requests.Session, upn: str, start_dt: datetim
                 )
             ]
         except Exception as exc2:
-            return CheckResult(label, "error", str(exc2)[:120])
+            return CheckResult(label, "error", str(exc2)[:120]), []
 
     if not records:
-        return CheckResult(label, "clean", f"No directory changes in last {_days_label(start_dt)}")
+        return CheckResult(label, "clean", f"No directory changes in last {_days_label(start_dt)}"), records
 
     flags: list[str] = []
     detail: list[str] = []
@@ -618,13 +637,15 @@ def _check_audit_activity(session: requests.Session, upn: str, start_dt: datetim
 
     flags = list(dict.fromkeys(flags))
     detail = list(dict.fromkeys(detail))
-    status = _flag_status(flags) if flags else "clean"
+    check_status = _flag_status(flags) if flags else "clean"
 
     summary = f"{len(records)} audit event(s) — {', '.join(list(dict.fromkeys(flags))[:4]) or 'no suspicious flags'}"
-    return CheckResult(label, status, summary, detail[:6], flags)
+    return CheckResult(label, check_status, summary, detail[:6], flags), records
 
 
-def _check_risky_status(session: requests.Session, upn: str, start_dt: datetime) -> CheckResult:
+def _check_risky_status(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
     label = "Identity Protection"
     try:
         data = _get(
@@ -634,12 +655,12 @@ def _check_risky_status(session: requests.Session, upn: str, start_dt: datetime)
         )
         users = data.get("value") or [] if isinstance(data, dict) else []
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires IdentityRiskyUser.Read.All (Entra ID P2)")
+        return CheckResult(label, "skipped", "Requires IdentityRiskyUser.Read.All (Entra ID P2)"), []
     except Exception as exc:
-        return CheckResult(label, "skipped", f"Not available: {str(exc)[:80]}")
+        return CheckResult(label, "skipped", f"Not available: {str(exc)[:80]}"), []
 
     if not users:
-        return CheckResult(label, "clean", "User not found in risky users list")
+        return CheckResult(label, "clean", "User not found in risky users list"), users
 
     user = users[0]
     risk_level = user.get("riskLevel") or "none"
@@ -655,17 +676,17 @@ def _check_risky_status(session: requests.Session, upn: str, start_dt: datetime)
     if risk_detail not in ("none", "hidden", ""):
         flags.append(f"IDENTITY_RISK:{risk_detail}")
 
-    status = _flag_status(flags) if flags else "clean"
+    check_status = _flag_status(flags) if flags else "clean"
     summary = f"Risk level: {risk_level}  |  State: {risk_state}"
     if last_updated:
         summary += f"  |  Last updated: {last_updated}"
 
-    return CheckResult(label, status, summary, flags[:], flags)
+    return CheckResult(label, check_status, summary, flags[:], flags), users
 
 
 # ── Runner ─────────────────────────────────────────────────────────────────────
 
-# Ordered list of checks to run
+# Ordered list of (check_key, check_function) — key is also used as the output file stem
 _CHECKS: list[tuple[str, Callable]] = [
     ("sign_ins",        _check_sign_ins),
     ("mfa_methods",     _check_mfa_methods),
@@ -678,9 +699,20 @@ _CHECKS: list[tuple[str, Callable]] = [
 ]
 
 
-def run_triage(token: str, upn: str, days: int = 7) -> TriageReport:
+def run_triage(
+    token: str,
+    upn: str,
+    days: int = 7,
+) -> tuple[TriageReport, dict[str, list[dict]]]:
     """
-    Run all triage checks for a single user and return a TriageReport.
+    Run all triage checks for a single user.
+
+    Returns:
+        (TriageReport, raw_records) where raw_records maps each check key
+        (e.g. "sign_ins", "mfa_methods") to the list of raw API records
+        fetched during that check.  Empty list if the check was skipped or
+        failed.  These records can be written to disk for downstream analysis
+        or SIEM ingestion.
 
     Checks run in parallel (ThreadPoolExecutor, 8 workers). Results are
     returned in the canonical check order regardless of completion order.
@@ -695,8 +727,8 @@ def run_triage(token: str, upn: str, days: int = 7) -> TriageReport:
     start_dt = datetime.now(timezone.utc) - timedelta(days=days)
     report = TriageReport(user=upn, tenant="", days=days)
 
-    # Run checks in parallel, preserve order
     results_map: dict[str, CheckResult] = {}
+    raw_records: dict[str, list[dict]] = {}
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
@@ -706,13 +738,16 @@ def run_triage(token: str, upn: str, days: int = 7) -> TriageReport:
         for future in as_completed(futures):
             key = futures[future]
             try:
-                results_map[key] = future.result()
+                check_result, records = future.result()
+                results_map[key] = check_result
+                raw_records[key] = records
             except Exception as exc:
                 results_map[key] = CheckResult(key, "error", str(exc)[:120])
+                raw_records[key] = []
 
     # Restore canonical order
     report.checks = [results_map[key] for key, _ in _CHECKS if key in results_map]
-    return report
+    return report, raw_records
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
