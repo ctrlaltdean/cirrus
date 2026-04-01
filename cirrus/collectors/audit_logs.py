@@ -232,11 +232,6 @@ class AuditLogsCollector(GraphCollector):
 
         Returns list of audit event dicts, each with an _iocFlags list.
         """
-        self._require_license(
-            "p1",
-            "Directory audit logs (/auditLogs/directoryAudits) require Entra ID P1 or higher.",
-        )
-
         since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
         filters = [f"activityDateTime ge {since}"]
 

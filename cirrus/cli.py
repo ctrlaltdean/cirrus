@@ -1975,11 +1975,37 @@ def _render_triage_handoff(
         border = "green"
         verdict_str = "[bold green]CLEAN[/bold green]"
 
+    # Detect if any checks were skipped due to missing admin consent (403)
+    mailbox_consent_needed = any(
+        "403" in (check.summary or "")
+        for report in reports
+        for check in report.checks
+        if check.label in ("Inbox Rules", "Mail Forwarding")
+    )
+
     lines: list[str] = [
         f"[bold]Overall verdict:[/bold] {verdict_str}",
         f"[bold]Case folder:[/bold]     [cyan]{case_dir}[/cyan]",
         "",
     ]
+
+    if mailbox_consent_needed:
+        consent_url = (
+            f"https://login.microsoftonline.com/{tenant}/adminconsent"
+            f"?client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e"
+        )
+        lines += [
+            "[yellow]⚠ Inbox Rules / Mail Forwarding checks were skipped (403).[/yellow]",
+            "[dim]To fix: an admin must grant consent for MailboxSettings.Read AND[/dim]",
+            "[dim]the running account needs Exchange Recipient Administrator role.[/dim]",
+            "",
+            f"  [bold]Admin consent URL:[/bold] [cyan]{consent_url}[/cyan]",
+            "",
+            "[dim]After granting consent, run:[/dim]",
+            "  [cyan]cirrus auth logout[/cyan]",
+            "[dim]then re-authenticate and re-run triage.[/dim]",
+            "",
+        ]
 
     if workflow_ran and not collect_only:
         lines += [

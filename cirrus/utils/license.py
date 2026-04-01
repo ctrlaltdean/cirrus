@@ -40,7 +40,7 @@ _LABEL = {
 # any Exchange-licensed tenant. Absence means some event types (MailItemsAccessed,
 # Send) may not appear in results, but the API call itself will succeed.
 _GATES = {
-    "p1":               ["signin_logs", "entra_audit_logs", "conditional_access_policies"],
+    "p1":               [],
     "p2":               ["risky_users", "risky_signins"],
     "advanced_auditing": [],
 }

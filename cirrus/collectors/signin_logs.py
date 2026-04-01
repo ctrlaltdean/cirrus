@@ -242,11 +242,6 @@ class SignInLogsCollector(GraphCollector):
 
         Returns list of sign-in event dicts, each with an _iocFlags list.
         """
-        self._require_license(
-            "p1",
-            "Sign-in logs (/auditLogs/signIns) require Entra ID P1 or higher.",
-        )
-
         since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
         filters = [f"createdDateTime ge {since}"]
 
