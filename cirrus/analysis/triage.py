@@ -386,10 +386,15 @@ def _run_inbox_analysis(rules: list[dict]) -> tuple[CheckResult, list[dict]]:
     if not rules:
         return CheckResult(label, "clean", "No inbox rules configured"), rules
 
-    # Folders that are commonly used to hide mail from the victim
+    # Folders that are commonly used to hide mail from the victim.
+    # Include both the Graph well-known folder names (no spaces, lowercase)
+    # and the Exchange/PS display names (spaces preserved after .lower()).
     _HIDDEN = {
-        "deleteditems", "junkemail", "rssfeedsroot", "drafts",
-        "conversationhistory",   # Teams/Skype conversation sync folder — attacker favourite
+        "deleteditems", "deleted items",
+        "junkemail", "junk email",
+        "rssfeedsroot", "rss feeds",
+        "drafts",
+        "conversationhistory", "conversation history",  # Teams/Skype sync folder
     }
     _FINANCE_KW = {"invoice", "wire", "payment", "transfer", "bank", "remittance",
                    "ach", "routing", "account number", "urgent", "confidential"}
