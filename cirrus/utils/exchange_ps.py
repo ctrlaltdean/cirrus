@@ -276,3 +276,130 @@ def _ensure_list(val: Any) -> list[dict]:
     if isinstance(val, dict):
         return [val]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Triage: inbox rules + mail forwarding for a single target mailbox
+# ---------------------------------------------------------------------------
+
+_TRIAGE_MAILBOX_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+try {
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop
+
+    $_connectArgs = @{ ShowBanner = $false; ErrorAction = 'Stop' }
+    if ($env:CIRRUS_EXO_UPN) { $_connectArgs['UserPrincipalName'] = $env:CIRRUS_EXO_UPN }
+    Connect-ExchangeOnline @_connectArgs
+
+    $result = [ordered]@{}
+    $target = $env:CIRRUS_TARGET_UPN
+
+    try {
+        $rules = @(Get-InboxRule -Mailbox $target -ErrorAction Stop |
+            Select-Object Name, Enabled, Priority,
+                ForwardTo, ForwardAsAttachmentTo, RedirectTo,
+                DeleteMessage, MarkAsRead, MoveToFolder, StopProcessingRules,
+                SubjectContainsWords, BodyContainsWords, FromAddressContainsWords)
+        $result.inbox_rules = $rules
+    } catch {
+        $result.inbox_rules = @()
+        $result.inbox_rules_error = $_.Exception.Message
+    }
+
+    try {
+        $mb = Get-Mailbox -Identity $target -ErrorAction Stop |
+            Select-Object ForwardingAddress, ForwardingSmtpAddress, DeliverToMailboxAndForward
+        $result.forwarding = $mb
+    } catch {
+        $result.forwarding = @{}
+        $result.forwarding_error = $_.Exception.Message
+    }
+
+    Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+
+    $result | ConvertTo-Json -Depth 5 -Compress
+
+} catch {
+    @{ __error = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 1
+}
+"""
+
+
+def run_triage_mailbox_ps(
+    target_upn: str,
+    admin_upn: str | None = None,
+) -> dict:
+    """
+    Collect inbox rules and mail forwarding settings for *target_upn* via
+    Exchange Online PowerShell.  Used as a fallback when the Graph API
+    returns 403 due to delegated-permission limitations.
+
+    Auth: Connect-ExchangeOnline with Modern Auth.  On first run a browser
+    window opens; on subsequent runs the EXO module reuses the cached token.
+
+    Returns a dict with keys:
+        available      bool   — False if PS / EXO module unavailable or error
+        inbox_rules    list   — raw Get-InboxRule output (PS field names)
+        forwarding     dict   — Get-Mailbox forwarding fields
+        error          str|None
+    """
+    result: dict = {"available": False, "inbox_rules": [], "forwarding": {}, "error": None}
+
+    ps_path = find_powershell()
+    if not ps_path:
+        result["error"] = (
+            "PowerShell not found — install PowerShell 7 to enable this fallback: "
+            "https://aka.ms/install-powershell"
+        )
+        return result
+
+    is_installed, _ = check_exa_module_installed(ps_path)
+    if not is_installed:
+        result["error"] = (
+            "ExchangeOnlineManagement module not installed — run: cirrus deps install"
+        )
+        return result
+
+    env = {
+        **os.environ,
+        "CIRRUS_TARGET_UPN": target_upn,
+        "CIRRUS_EXO_UPN": admin_upn or "",
+    }
+
+    try:
+        proc = subprocess.run(
+            [ps_path, "-NoProfile", "-Command", _TRIAGE_MAILBOX_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        result["error"] = "Exchange Online PowerShell timed out (2 min)."
+        return result
+    except Exception as exc:
+        result["error"] = f"Failed to launch PowerShell: {exc}"
+        return result
+
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+
+    if not stdout:
+        result["error"] = f"No output from PowerShell. stderr: {stderr[:300]}"
+        return result
+
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        result["error"] = f"Could not parse PowerShell output: {stdout[:200]}"
+        return result
+
+    if "__error" in data:
+        result["error"] = f"Exchange Online: {data['__error']}"
+        return result
+
+    result["available"] = True
+    result["inbox_rules"] = _ensure_list(data.get("inbox_rules", []))
+    result["forwarding"] = data.get("forwarding") or {}
+    return result

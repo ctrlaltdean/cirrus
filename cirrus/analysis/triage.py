@@ -373,6 +373,15 @@ def _check_inbox_rules(
     except Exception as exc:
         return CheckResult(label, "error", str(exc)[:120]), []
 
+    return _run_inbox_analysis(rules)
+
+
+def _run_inbox_analysis(rules: list[dict]) -> tuple[CheckResult, list[dict]]:
+    """
+    Pure analysis of a list of inbox rule dicts (Graph or normalized PS format).
+    Extracted so it can be called by both the live check and the PS fallback.
+    """
+    label = "Inbox rules"
     if not rules:
         return CheckResult(label, "clean", "No inbox rules configured"), rules
 
@@ -384,19 +393,16 @@ def _check_inbox_rules(
     suspicious: list[str] = []
 
     for rule in rules:
-        name = rule.get("displayName") or ""
         actions = rule.get("actions") or {}
         conditions = rule.get("conditions") or {}
 
-        fwd = actions.get("forwardTo") or []
-        for addr in fwd:
+        for addr in (actions.get("forwardTo") or []):
             email = (addr.get("emailAddress") or {}).get("address") or ""
             if email:
                 flags.append(f"FORWARDS_TO:{email}")
                 suspicious.append(f"forwards to {email}")
 
-        fwd_redirect = actions.get("redirectTo") or []
-        for addr in fwd_redirect:
+        for addr in (actions.get("redirectTo") or []):
             email = (addr.get("emailAddress") or {}).get("address") or ""
             if email:
                 flags.append(f"FORWARDS_TO:{email}")
@@ -409,40 +415,27 @@ def _check_inbox_rules(
         if any(h in move_folder for h in _HIDDEN):
             flags.append(f"MOVES_TO_HIDDEN_FOLDER:{actions.get('moveToFolder')}")
 
-        if actions.get("markAsRead") and (fwd or actions.get("permanentDelete")):
+        if actions.get("markAsRead") and (actions.get("forwardTo") or actions.get("permanentDelete")):
             flags.append("MARKS_AS_READ")
 
-        body_contains = conditions.get("bodyContains") or []
-        subject_contains = conditions.get("subjectContains") or []
-        for kw in (body_contains + subject_contains):
+        for kw in ((conditions.get("bodyContains") or []) + (conditions.get("subjectContains") or [])):
             if kw.lower() in _FINANCE_KW:
                 flags.append(f"SUSPICIOUS_KEYWORD:{kw}")
 
     flags = list(dict.fromkeys(flags))
-    check_status = _flag_status(flags) if flags else "clean"
-
     summary = f"{len(rules)} rule(s)"
     if suspicious:
         summary += f" — {'; '.join(suspicious[:3])}"
+    return CheckResult(label, _flag_status(flags) if flags else "clean", summary,
+                       list(dict.fromkeys(flags)), flags), rules
 
-    return CheckResult(label, check_status, summary, list(dict.fromkeys(flags)), flags), rules
 
-
-def _check_mail_forwarding(
-    session: requests.Session, upn: str, start_dt: datetime
-) -> tuple[CheckResult, list[dict]]:
+def _run_forwarding_analysis(upn: str, settings: dict) -> tuple[CheckResult, list[dict]]:
+    """
+    Pure analysis of a mailboxSettings dict (Graph or normalized PS format).
+    Extracted so it can be called by both the live check and the PS fallback.
+    """
     label = "Mail forwarding"
-    try:
-        settings = _get(session, f"{GRAPH_BASE}/users/{upn}/mailboxSettings")
-        if not isinstance(settings, dict):
-            raise ValueError("Unexpected response")
-    except PermissionError as exc:
-        return CheckResult(label, "skipped", str(exc)[:160]), []
-    except (FileNotFoundError, ValueError):
-        return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed"), []
-    except Exception as exc:
-        return CheckResult(label, "error", str(exc)[:120]), []
-
     fwd_smtp = settings.get("forwardingSmtpAddress") or ""
     fwd_addr = settings.get("forwardingAddress") or ""
     deliver_and_fwd = settings.get("deliverToMailboxAndForward", True)
@@ -466,10 +459,28 @@ def _check_mail_forwarding(
     if not deliver_and_fwd:
         flags.append("NO_LOCAL_COPY:victim_receives_nothing")
 
-    check_status = _flag_status(flags) if flags else "warn"
     dest = fwd_smtp or fwd_addr
     summary = f"Forwarding to: {dest}" + (" (no local copy)" if not deliver_and_fwd else "")
-    return CheckResult(label, check_status, summary, flags[:], flags), [settings]
+    return CheckResult(label, _flag_status(flags) if flags else "warn", summary,
+                       flags[:], flags), [settings]
+
+
+def _check_mail_forwarding(
+    session: requests.Session, upn: str, start_dt: datetime
+) -> tuple[CheckResult, list[dict]]:
+    label = "Mail forwarding"
+    try:
+        settings = _get(session, f"{GRAPH_BASE}/users/{upn}/mailboxSettings")
+        if not isinstance(settings, dict):
+            raise ValueError("Unexpected response")
+    except PermissionError as exc:
+        return CheckResult(label, "skipped", str(exc)[:160]), []
+    except (FileNotFoundError, ValueError):
+        return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed"), []
+    except Exception as exc:
+        return CheckResult(label, "error", str(exc)[:120]), []
+
+    return _run_forwarding_analysis(upn, settings)
 
 
 def _check_oauth_grants(
@@ -785,9 +796,8 @@ def run_triage(
                 results_map[key] = CheckResult(key, "error", str(exc)[:120])
                 raw_records[key] = []
 
-    # Detect role issue: scope was in the token but the API still 403'd.
-    # This means the authenticated account lacks Exchange Recipient Administrator.
-    mailbox_role_missing = (
+    # Detect whether Graph 403'd on the mailbox checks (scope present but access denied).
+    graph_mailbox_403 = (
         not mailbox_scope_missing and
         any(
             results_map.get(k, CheckResult("", "clean", "")).status == "skipped" and
@@ -795,6 +805,44 @@ def run_triage(
             for k in _MAILBOX_CHECKS
         )
     )
+
+    # ------------------------------------------------------------------ #
+    # PowerShell fallback — runs only when Graph returned 403             #
+    # ------------------------------------------------------------------ #
+    mailbox_role_missing = False
+    if graph_mailbox_403:
+        try:
+            from cirrus.utils.exchange_ps import run_triage_mailbox_ps
+            ps_data = run_triage_mailbox_ps(upn)
+        except Exception:
+            ps_data = {"available": False, "error": "PowerShell fallback unavailable"}
+
+        if ps_data.get("available"):
+            # Re-run analysis with PS-sourced, normalized records
+            ps_rules = _normalize_ps_inbox_rules(ps_data.get("inbox_rules") or [])
+            ps_fwd   = _normalize_ps_mailbox_forwarding(ps_data.get("forwarding") or {})
+
+            # Patch inbox_rules result
+            ir_result, ir_records = _check_inbox_rules.__wrapped__(ps_rules) \
+                if hasattr(_check_inbox_rules, "__wrapped__") \
+                else _run_inbox_analysis(ps_rules)
+            results_map["inbox_rules"] = ir_result
+            raw_records["inbox_rules"] = ir_records
+
+            # Patch mail_forwarding result
+            fwd_result, fwd_records = _run_forwarding_analysis(upn, ps_fwd)
+            results_map["mail_forwarding"] = fwd_result
+            raw_records["mail_forwarding"] = fwd_records
+        else:
+            # PS not available or failed — flag role issue for the caller to display
+            mailbox_role_missing = True
+            ps_err = ps_data.get("error") or "PowerShell unavailable"
+            for k, label in (("inbox_rules", "Inbox rules"), ("mail_forwarding", "Mail forwarding")):
+                if results_map.get(k, CheckResult("", "clean", "")).status == "skipped":
+                    results_map[k] = CheckResult(
+                        label, "skipped",
+                        f"403 (Graph) — PS fallback failed: {ps_err[:100]}",
+                    )
 
     # Restore canonical order
     report.checks = [results_map[key] for key, _ in _CHECKS if key in results_map]
@@ -806,6 +854,72 @@ def run_triage(
 def _days_label(start_dt: datetime) -> str:
     diff = datetime.now(timezone.utc) - start_dt
     return f"{diff.days} day(s)"
+
+
+def _ps_addr_to_graph(val: object) -> list[dict]:
+    """
+    Convert a PowerShell address field (str, dict, or list thereof) to the
+    Graph messageRule `emailAddress` format used by the analysis functions.
+    """
+    def _one(item: object) -> str:
+        if isinstance(item, str):
+            return item.lstrip("smtp:").lstrip("SMTP:")
+        if isinstance(item, dict):
+            addr = (
+                item.get("Address") or item.get("address") or
+                item.get("RawString") or item.get("SmtpAddress") or ""
+            )
+            return str(addr).lstrip("smtp:").lstrip("SMTP:")
+        return ""
+
+    items = val if isinstance(val, list) else ([val] if val else [])
+    return [
+        {"emailAddress": {"address": a}}
+        for item in items
+        if (a := _one(item))
+    ]
+
+
+def _normalize_ps_inbox_rules(ps_rules: list[dict]) -> list[dict]:
+    """
+    Convert Get-InboxRule PowerShell output to Graph messageRule-compatible
+    format so the existing _check_inbox_rules analysis logic can be reused.
+    """
+    normalized = []
+    for r in ps_rules:
+        normalized.append({
+            "displayName": r.get("Name") or "",
+            "isEnabled": r.get("Enabled", True),
+            "actions": {
+                "forwardTo":            _ps_addr_to_graph(r.get("ForwardTo")),
+                "forwardAsAttachmentTo": _ps_addr_to_graph(r.get("ForwardAsAttachmentTo")),
+                "redirectTo":           _ps_addr_to_graph(r.get("RedirectTo")),
+                "permanentDelete":      bool(r.get("DeleteMessage", False)),
+                "markAsRead":           bool(r.get("MarkAsRead", False)),
+                "moveToFolder":         r.get("MoveToFolder") or "",
+            },
+            "conditions": {
+                "subjectContains": r.get("SubjectContainsWords") or [],
+                "bodyContains":    r.get("BodyContainsWords") or [],
+            },
+        })
+    return normalized
+
+
+def _normalize_ps_mailbox_forwarding(ps_mb: dict) -> dict:
+    """
+    Convert Get-Mailbox PowerShell forwarding output to Graph mailboxSettings
+    format so the existing _check_mail_forwarding analysis logic can be reused.
+    PS returns "smtp:user@domain.com"; Graph returns "user@domain.com".
+    """
+    fwd_smtp = (ps_mb.get("ForwardingSmtpAddress") or "")
+    if fwd_smtp.lower().startswith("smtp:"):
+        fwd_smtp = fwd_smtp[5:]
+    return {
+        "forwardingSmtpAddress":       fwd_smtp,
+        "forwardingAddress":           ps_mb.get("ForwardingAddress") or "",
+        "deliverToMailboxAndForward":  ps_mb.get("DeliverToMailboxAndForward", True),
+    }
 
 
 def decode_token_scopes(token: str) -> set[str]:
