@@ -1785,6 +1785,7 @@ def triage(
 
     all_reports = []
     all_raw: dict[str, list[dict]] = _defaultdict(list)
+    any_mailbox_consent_needed = False
 
     for upn in target_users:
         console.print(
@@ -1793,13 +1794,19 @@ def triage(
         )
 
         with console.status(f"[dim]Running 8 checks in parallel...[/dim]"):
-            report, raw_records = run_triage(token=token, upn=upn, days=days)
+            report, raw_records, mailbox_consent_needed = run_triage(token=token, upn=upn, days=days)
+
+        if mailbox_consent_needed:
+            any_mailbox_consent_needed = True
 
         all_reports.append(report)
         for check_key, records in raw_records.items():
             all_raw[check_key].extend(records)
 
         _render_triage_report(report)
+
+        if mailbox_consent_needed:
+            _render_mailbox_consent_hint(tenant)
 
         if len(target_users) > 1:
             console.print()
@@ -1890,6 +1897,7 @@ def triage(
         reports=all_reports,
         workflow_ran=should_run_workflow,
         collect_only=collect_only,
+        mailbox_consent_needed=any_mailbox_consent_needed,
     )
 
 
@@ -1952,12 +1960,34 @@ def _render_triage_report(report: "TriageReport") -> None:
     )
 
 
+def _render_mailbox_consent_hint(tenant: str) -> None:
+    """Print an inline warning when MailboxSettings.Read is missing from the token."""
+    consent_url = (
+        f"https://login.microsoftonline.com/{tenant}/adminconsent"
+        f"?client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e"
+    )
+    console.print(
+        f"\n  [yellow bold]⚠ Inbox Rules and Mail Forwarding were skipped.[/yellow bold]\n"
+        f"  [dim]MailboxSettings.Read was not granted in the token — admin consent is required.[/dim]\n"
+        f"\n"
+        f"  [bold]Step 1:[/bold] A Global Admin must visit:\n"
+        f"    [cyan]{consent_url}[/cyan]\n"
+        f"\n"
+        f"  [bold]Step 2:[/bold] Your account needs the [bold]Exchange Recipient Administrator[/bold] role.\n"
+        f"\n"
+        f"  [bold]Step 3:[/bold] After consent is granted, clear your cached token and re-authenticate:\n"
+        f"    [cyan]cirrus auth logout[/cyan]\n"
+        f"    [cyan]cirrus auth login --tenant {tenant}[/cyan]\n"
+    )
+
+
 def _render_triage_handoff(
     case_dir: "Path",
     tenant: str,
     reports: list,
     workflow_ran: bool,
     collect_only: bool,
+    mailbox_consent_needed: bool = False,
 ) -> None:
     """Print the final handoff panel after all triage work is done."""
     overall = max(
@@ -1975,14 +2005,6 @@ def _render_triage_handoff(
         border = "green"
         verdict_str = "[bold green]CLEAN[/bold green]"
 
-    # Detect if any checks were skipped due to missing admin consent (403)
-    mailbox_consent_needed = any(
-        "403" in (check.summary or "")
-        for report in reports
-        for check in report.checks
-        if check.label in ("Inbox Rules", "Mail Forwarding")
-    )
-
     lines: list[str] = [
         f"[bold]Overall verdict:[/bold] {verdict_str}",
         f"[bold]Case folder:[/bold]     [cyan]{case_dir}[/cyan]",
@@ -1990,20 +2012,8 @@ def _render_triage_handoff(
     ]
 
     if mailbox_consent_needed:
-        consent_url = (
-            f"https://login.microsoftonline.com/{tenant}/adminconsent"
-            f"?client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e"
-        )
         lines += [
-            "[yellow]⚠ Inbox Rules / Mail Forwarding checks were skipped (403).[/yellow]",
-            "[dim]To fix: an admin must grant consent for MailboxSettings.Read AND[/dim]",
-            "[dim]the running account needs Exchange Recipient Administrator role.[/dim]",
-            "",
-            f"  [bold]Admin consent URL:[/bold] [cyan]{consent_url}[/cyan]",
-            "",
-            "[dim]After granting consent, run:[/dim]",
-            "  [cyan]cirrus auth logout[/cyan]",
-            "[dim]then re-authenticate and re-run triage.[/dim]",
+            "[yellow]⚠ Inbox Rules / Mail Forwarding were skipped — see above for fix instructions.[/yellow]",
             "",
         ]
 

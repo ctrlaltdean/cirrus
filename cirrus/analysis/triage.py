@@ -30,6 +30,8 @@ CheckResult status levels:
 
 from __future__ import annotations
 
+import base64
+import json as _json
 import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -699,20 +701,28 @@ _CHECKS: list[tuple[str, Callable]] = [
 ]
 
 
+_MAILBOX_SCOPE = "MailboxSettings.Read"
+_MAILBOX_CHECKS = frozenset({"inbox_rules", "mail_forwarding"})
+
+
 def run_triage(
     token: str,
     upn: str,
     days: int = 7,
-) -> tuple[TriageReport, dict[str, list[dict]]]:
+) -> tuple[TriageReport, dict[str, list[dict]], bool]:
     """
     Run all triage checks for a single user.
 
     Returns:
-        (TriageReport, raw_records) where raw_records maps each check key
-        (e.g. "sign_ins", "mfa_methods") to the list of raw API records
-        fetched during that check.  Empty list if the check was skipped or
-        failed.  These records can be written to disk for downstream analysis
-        or SIEM ingestion.
+        (TriageReport, raw_records, mailbox_consent_needed)
+
+        raw_records maps each check key (e.g. "sign_ins", "mfa_methods")
+        to the list of raw API records fetched during that check.  Empty
+        list if the check was skipped or failed.
+
+        mailbox_consent_needed is True when MailboxSettings.Read was not
+        found in the token — the caller should display the admin consent
+        URL to the operator.
 
     Checks run in parallel (ThreadPoolExecutor, 8 workers). Results are
     returned in the canonical check order regardless of completion order.
@@ -727,13 +737,33 @@ def run_triage(
     start_dt = datetime.now(timezone.utc) - timedelta(days=days)
     report = TriageReport(user=upn, tenant="", days=days)
 
+    # Check upfront whether MailboxSettings.Read was actually granted.
+    # If not, pre-skip the mailbox checks rather than making API calls
+    # that will 403 (the scope is silently dropped from the token when
+    # admin consent hasn't been granted in the tenant).
+    token_scopes = decode_token_scopes(token)
+    mailbox_consent_needed = bool(token_scopes) and _MAILBOX_SCOPE not in token_scopes
+
     results_map: dict[str, CheckResult] = {}
     raw_records: dict[str, list[dict]] = {}
+
+    # Pre-populate mailbox checks as skipped when the scope is absent.
+    if mailbox_consent_needed:
+        skip_msg = f"Skipped — {_MAILBOX_SCOPE} not in token (admin consent required)"
+        results_map["inbox_rules"] = CheckResult("Inbox rules", "skipped", skip_msg)
+        results_map["mail_forwarding"] = CheckResult("Mail forwarding", "skipped", skip_msg)
+        raw_records["inbox_rules"] = []
+        raw_records["mail_forwarding"] = []
+
+    checks_to_run = [
+        (key, fn) for key, fn in _CHECKS
+        if key not in results_map
+    ]
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
             pool.submit(fn, session, upn, start_dt): key
-            for key, fn in _CHECKS
+            for key, fn in checks_to_run
         }
         for future in as_completed(futures):
             key = futures[future]
@@ -747,7 +777,7 @@ def run_triage(
 
     # Restore canonical order
     report.checks = [results_map[key] for key, _ in _CHECKS if key in results_map]
-    return report, raw_records
+    return report, raw_records, mailbox_consent_needed
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -755,3 +785,24 @@ def run_triage(
 def _days_label(start_dt: datetime) -> str:
     diff = datetime.now(timezone.utc) - start_dt
     return f"{diff.days} day(s)"
+
+
+def decode_token_scopes(token: str) -> set[str]:
+    """
+    Decode the JWT access token and return the set of granted scopes.
+
+    Reads the 'scp' claim from the token payload without verifying the
+    signature — we only care what scopes were actually issued so we can
+    skip checks that will 403 before making any API calls.
+
+    Returns an empty set on any decode error (fail-open: let the API
+    call surface the real error instead of blocking on a decode failure).
+    """
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        payload = _json.loads(base64.b64decode(payload_b64))
+        scp = payload.get("scp", "")
+        return set(scp.split()) if scp else set()
+    except Exception:
+        return set()
