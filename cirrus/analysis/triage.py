@@ -128,7 +128,14 @@ class TriageReport:
 def _get(session: requests.Session, url: str, params: dict | None = None) -> dict | list:
     resp = session.get(url, params=params, timeout=30)
     if resp.status_code == 403:
-        raise PermissionError(f"403 Forbidden: {url}")
+        try:
+            err = resp.json().get("error", {})
+            code = err.get("code", "")
+            msg = (err.get("message") or "")[:120]
+            detail = f"{code}: {msg}" if code else msg
+        except Exception:
+            detail = url
+        raise PermissionError(f"403 {detail}".strip())
     if resp.status_code == 404:
         raise FileNotFoundError(f"404 Not Found: {url}")
     if resp.status_code == 400:
@@ -359,8 +366,8 @@ def _check_inbox_rules(
             session,
             f"{GRAPH_BASE}/users/{upn}/mailFolders/inbox/messageRules",
         )
-    except PermissionError:
-        return CheckResult(label, "skipped", "403 — admin consent needed for MailboxSettings.Read, or add Exchange Recipient Administrator role"), []
+    except PermissionError as exc:
+        return CheckResult(label, "skipped", str(exc)[:160]), []
     except (FileNotFoundError, ValueError):
         return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed"), []
     except Exception as exc:
@@ -429,8 +436,8 @@ def _check_mail_forwarding(
         settings = _get(session, f"{GRAPH_BASE}/users/{upn}/mailboxSettings")
         if not isinstance(settings, dict):
             raise ValueError("Unexpected response")
-    except PermissionError:
-        return CheckResult(label, "skipped", "403 — admin consent needed for MailboxSettings.Read, or add Exchange Recipient Administrator role"), []
+    except PermissionError as exc:
+        return CheckResult(label, "skipped", str(exc)[:160]), []
     except (FileNotFoundError, ValueError):
         return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed"), []
     except Exception as exc:
@@ -709,20 +716,24 @@ def run_triage(
     token: str,
     upn: str,
     days: int = 7,
-) -> tuple[TriageReport, dict[str, list[dict]], bool]:
+) -> tuple[TriageReport, dict[str, list[dict]], bool, bool]:
     """
     Run all triage checks for a single user.
 
     Returns:
-        (TriageReport, raw_records, mailbox_consent_needed)
+        (TriageReport, raw_records, mailbox_scope_missing, mailbox_role_missing)
 
         raw_records maps each check key (e.g. "sign_ins", "mfa_methods")
-        to the list of raw API records fetched during that check.  Empty
-        list if the check was skipped or failed.
+        to the list of raw API records fetched during that check.
 
-        mailbox_consent_needed is True when MailboxSettings.Read was not
-        found in the token — the caller should display the admin consent
-        URL to the operator.
+        mailbox_scope_missing — True when MailboxSettings.Read was not in
+        the token at all (scope was never consented to).  Rare edge case
+        since MailboxSettings.Read does not require admin consent.
+
+        mailbox_role_missing — True when the scope IS in the token but
+        the API still returned 403.  This means the running account lacks
+        the Exchange Recipient Administrator role needed to read other
+        users' mailbox data via delegated permissions.
 
     Checks run in parallel (ThreadPoolExecutor, 8 workers). Results are
     returned in the canonical check order regardless of completion order.
@@ -737,19 +748,18 @@ def run_triage(
     start_dt = datetime.now(timezone.utc) - timedelta(days=days)
     report = TriageReport(user=upn, tenant="", days=days)
 
-    # Check upfront whether MailboxSettings.Read was actually granted.
-    # If not, pre-skip the mailbox checks rather than making API calls
-    # that will 403 (the scope is silently dropped from the token when
-    # admin consent hasn't been granted in the tenant).
+    # Decode the token to check whether MailboxSettings.Read was granted.
+    # The scope does NOT require admin consent — a user-level Accept in the
+    # browser is sufficient.  If it's missing, that's an unusual edge case.
     token_scopes = decode_token_scopes(token)
-    mailbox_consent_needed = bool(token_scopes) and _MAILBOX_SCOPE not in token_scopes
+    mailbox_scope_missing = bool(token_scopes) and _MAILBOX_SCOPE not in token_scopes
 
     results_map: dict[str, CheckResult] = {}
     raw_records: dict[str, list[dict]] = {}
 
-    # Pre-populate mailbox checks as skipped when the scope is absent.
-    if mailbox_consent_needed:
-        skip_msg = f"Skipped — {_MAILBOX_SCOPE} not in token (admin consent required)"
+    # Pre-populate mailbox checks as skipped only if the scope itself is absent.
+    if mailbox_scope_missing:
+        skip_msg = f"Skipped — {_MAILBOX_SCOPE} not in token (re-authenticate to re-consent)"
         results_map["inbox_rules"] = CheckResult("Inbox rules", "skipped", skip_msg)
         results_map["mail_forwarding"] = CheckResult("Mail forwarding", "skipped", skip_msg)
         raw_records["inbox_rules"] = []
@@ -775,9 +785,20 @@ def run_triage(
                 results_map[key] = CheckResult(key, "error", str(exc)[:120])
                 raw_records[key] = []
 
+    # Detect role issue: scope was in the token but the API still 403'd.
+    # This means the authenticated account lacks Exchange Recipient Administrator.
+    mailbox_role_missing = (
+        not mailbox_scope_missing and
+        any(
+            results_map.get(k, CheckResult("", "clean", "")).status == "skipped" and
+            "403" in (results_map.get(k, CheckResult("", "clean", "")).summary or "")
+            for k in _MAILBOX_CHECKS
+        )
+    )
+
     # Restore canonical order
     report.checks = [results_map[key] for key, _ in _CHECKS if key in results_map]
-    return report, raw_records, mailbox_consent_needed
+    return report, raw_records, mailbox_scope_missing, mailbox_role_missing
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

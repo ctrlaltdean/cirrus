@@ -1794,9 +1794,9 @@ def triage(
         )
 
         with console.status(f"[dim]Running 8 checks in parallel...[/dim]"):
-            report, raw_records, mailbox_consent_needed = run_triage(token=token, upn=upn, days=days)
+            report, raw_records, mailbox_scope_missing, mailbox_role_missing = run_triage(token=token, upn=upn, days=days)
 
-        if mailbox_consent_needed:
+        if mailbox_scope_missing or mailbox_role_missing:
             any_mailbox_consent_needed = True
 
         all_reports.append(report)
@@ -1805,7 +1805,9 @@ def triage(
 
         _render_triage_report(report)
 
-        if mailbox_consent_needed:
+        if mailbox_role_missing:
+            _render_mailbox_role_hint()
+        elif mailbox_scope_missing:
             _render_mailbox_consent_hint(tenant)
 
         if len(target_users) > 1:
@@ -1960,24 +1962,36 @@ def _render_triage_report(report: "TriageReport") -> None:
     )
 
 
-def _render_mailbox_consent_hint(tenant: str) -> None:
-    """Print an inline warning when MailboxSettings.Read is missing from the token."""
-    consent_url = (
-        f"https://login.microsoftonline.com/{tenant}/adminconsent"
-        f"?client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e"
+def _render_mailbox_role_hint() -> None:
+    """Print an inline warning when scope is present but 403 still occurs (role missing)."""
+    console.print(
+        f"\n  [yellow bold]⚠ Inbox Rules and Mail Forwarding were skipped (403).[/yellow bold]\n"
+        f"  [dim]The MailboxSettings.Read scope was granted correctly — this is a role issue.[/dim]\n"
+        f"  [dim]Delegated access to other users' mailbox data requires an Exchange admin role.[/dim]\n"
+        f"\n"
+        f"  [bold]Fix:[/bold] Assign [bold]Exchange Recipient Administrator[/bold] to the account\n"
+        f"  running CIRRUS in the Microsoft 365 admin center or Entra ID:\n"
+        f"\n"
+        f"    Microsoft 365 admin center → Active users → [account] → Roles\n"
+        f"    [dim]or[/dim]\n"
+        f"    Entra ID → Users → [account] → Assigned roles → Add assignment\n"
+        f"\n"
+        f"  After the role is assigned, re-run triage — no re-authentication needed.\n"
     )
+
+
+def _render_mailbox_consent_hint(tenant: str) -> None:
+    """Print an inline warning when MailboxSettings.Read is missing from the token (unusual)."""
     console.print(
         f"\n  [yellow bold]⚠ Inbox Rules and Mail Forwarding were skipped.[/yellow bold]\n"
-        f"  [dim]MailboxSettings.Read was not granted in the token — admin consent is required.[/dim]\n"
+        f"  [dim]MailboxSettings.Read was not found in the token — try clearing your cached token.[/dim]\n"
         f"\n"
-        f"  [bold]Step 1:[/bold] A Global Admin must visit:\n"
-        f"    [cyan]{consent_url}[/cyan]\n"
-        f"\n"
-        f"  [bold]Step 2:[/bold] Your account needs the [bold]Exchange Recipient Administrator[/bold] role.\n"
-        f"\n"
-        f"  [bold]Step 3:[/bold] After consent is granted, clear your cached token and re-authenticate:\n"
+        f"  [bold]Fix:[/bold]\n"
         f"    [cyan]cirrus auth logout[/cyan]\n"
         f"    [cyan]cirrus auth login --tenant {tenant}[/cyan]\n"
+        f"\n"
+        f"  [dim]If the problem persists, your account also needs the[/dim]\n"
+        f"  [dim]Exchange Recipient Administrator role to read other users' mailbox data.[/dim]\n"
     )
 
 
@@ -2013,7 +2027,8 @@ def _render_triage_handoff(
 
     if mailbox_consent_needed:
         lines += [
-            "[yellow]⚠ Inbox Rules / Mail Forwarding were skipped — see above for fix instructions.[/yellow]",
+            "[yellow]⚠ Inbox Rules / Mail Forwarding skipped — Exchange Recipient Administrator role required.[/yellow]",
+            "[dim]See fix instructions printed above the handoff panel.[/dim]",
             "",
         ]
 
