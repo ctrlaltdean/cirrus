@@ -358,7 +358,7 @@ def _check_inbox_rules(
             f"{GRAPH_BASE}/users/{upn}/mailFolders/inbox/messageRules",
         )
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires MailboxSettings.Read / Mail.Read"), []
+        return CheckResult(label, "skipped", "403 — admin consent needed for MailboxSettings.Read, or add Exchange Recipient Administrator role"), []
     except (FileNotFoundError, ValueError):
         return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed"), []
     except Exception as exc:
@@ -428,7 +428,7 @@ def _check_mail_forwarding(
         if not isinstance(settings, dict):
             raise ValueError("Unexpected response")
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires MailboxSettings.Read"), []
+        return CheckResult(label, "skipped", "403 — admin consent needed for MailboxSettings.Read, or add Exchange Recipient Administrator role"), []
     except (FileNotFoundError, ValueError):
         return CheckResult(label, "skipped", "Mailbox not found or not Exchange-licensed"), []
     except Exception as exc:

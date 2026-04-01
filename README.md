@@ -227,26 +227,37 @@ CIRRUS uses **delegated permissions** — the signed-in account must hold the ro
 
 | Workflow | Minimum roles required |
 |---|---|
-| `cirrus triage` | Global Reader + Security Reader |
-| `cirrus run bec` | Global Reader + Security Reader |
+| `cirrus triage` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
+| `cirrus run bec` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
 | `cirrus run ato` | Global Reader + Security Reader |
-| `cirrus run bec-ato` | Global Reader + Security Reader |
-| `cirrus run full` | Global Reader + Security Reader |
+| `cirrus run bec-ato` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
+| `cirrus run full` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
 | `cirrus run audit` | Global Reader + Security Reader (+ Exchange Administrator for PowerShell checks) |
+
+¹ Required for inbox rules and mail forwarding checks. Without this role those collectors are skipped — all other collectors continue normally. See [Exchange Recipient Administrator](#exchange-recipient-administrator-inbox-rules--mail-forwarding) below.
 
 ### What each role covers
 
 **Global Reader** *(mandatory for all workflows)*
-Provides read access to nearly all Microsoft 365 and Entra ID data via Graph API: users, groups, devices, audit logs, sign-in logs, app registrations, Conditional Access policies, role assignments, mailbox settings, reports, and the Unified Audit Log. This single role satisfies the majority of what CIRRUS collects.
+Provides read access to nearly all Microsoft 365 and Entra ID data via Graph API: users, groups, devices, audit logs, sign-in logs, app registrations, Conditional Access policies, role assignments, reports, and the Unified Audit Log. This single role satisfies the majority of what CIRRUS collects.
 
 **Security Reader** *(mandatory for all workflows)*
 Required for Identity Protection data (risky user state, risk detections) and Microsoft Defender security events. Without this role, triage and workflow runs will skip Identity Protection checks but otherwise function normally.
+
+**Exchange Recipient Administrator** *(inbox rules + mail forwarding)*
+Required to read inbox rules (`/mailFolders/inbox/messageRules`) and mailbox forwarding settings (`/mailboxSettings`) for users other than the signed-in account. This is a two-part requirement:
+
+1. **Admin consent for `MailboxSettings.Read`** must be granted in the tenant. This scope is in CIRRUS's request list but is flagged by Microsoft as requiring admin consent — tokens issued without admin consent will not include it, and API calls return 403 even though the scope appears correct. Use the admin consent URL in the [Admin Consent](#admin-consent) section to approve it once per tenant.
+
+2. **Exchange Recipient Administrator role** (or Exchange Administrator) on the investigation account. Global Reader covers Entra ID and M365 admin surfaces but does not grant delegated access to other users' Exchange mailbox data. Exchange Recipient Administrator is the minimum Exchange role that provides read access to mailbox properties for other users.
+
+Without Exchange Recipient Administrator, inbox rule and mail forwarding checks are skipped in both triage and BEC/BEC+ATO/Full workflow runs. All other collectors continue to function normally.
 
 **Important limitation — MFA methods for admin accounts:**
 `UserAuthenticationMethod.Read.All` with delegated permissions has a Microsoft-enforced restriction: accounts holding admin roles (Global Admin, Exchange Admin, etc.) have their MFA methods protected. Global Reader can read MFA methods for non-admin users but **cannot** read MFA methods for accounts that hold any administrator role. To read MFA methods for admin accounts, the investigation account itself must hold **Privileged Authentication Administrator**. This is a higher-privilege role — evaluate whether it is appropriate for the engagement before requesting it.
 
 **Exchange Administrator** *(compliance audit only)*
-Required only for `cirrus run audit` when Exchange Online PowerShell checks are enabled. The PowerShell module (`ExchangeOnlineManagement`) connects separately from Graph API and uses its own authentication. Global Reader alone is sufficient for all Exchange data collected via Graph.
+Required only for `cirrus run audit` when Exchange Online PowerShell checks are enabled. The PowerShell module (`ExchangeOnlineManagement`) connects separately from Graph API and uses its own authentication.
 
 ### Provisioning a dedicated investigation account
 
@@ -262,6 +273,14 @@ When a customer needs to create an account specifically for a CIRRUS engagement,
 Global Reader
 Security Reader
 ```
+
+**Role assignments** (recommended — adds inbox rules + mail forwarding checks):
+```
+Global Reader
+Security Reader
+Exchange Recipient Administrator
+```
+Also requires admin consent for `MailboxSettings.Read` — see [Admin Consent](#admin-consent).
 
 **Role assignments** (if compliance audit is in scope):
 ```
