@@ -36,6 +36,11 @@ GRAPH_SCOPES = [
     "https://graph.microsoft.com/RoleManagement.Read.Directory",
 ]
 
+# Exchange Online scope — used to obtain a token for Connect-ExchangeOnline
+# -AccessToken so the EXO PowerShell session reuses the existing MSAL auth
+# rather than opening a second browser prompt.
+EXO_SCOPES = ["https://outlook.office365.com/Exchange.Manage"]
+
 CACHE_DIR = Path.home() / ".cirrus"
 CACHE_FILE = CACHE_DIR / "token_cache.json"
 
@@ -134,6 +139,31 @@ def get_token_silent(tenant_id: str, client_id: str = DEFAULT_CLIENT_ID) -> str 
     if not accounts:
         return None
     result = app.acquire_token_silent(GRAPH_SCOPES, account=accounts[0])
+    _save_cache(cache)
+    if result and "access_token" in result:
+        return result["access_token"]
+    return None
+
+
+def get_exo_token_silent(tenant_id: str, client_id: str = DEFAULT_CLIENT_ID) -> str | None:
+    """
+    Try to acquire an Exchange Online access token silently using the existing
+    MSAL token cache (same account/refresh token as the Graph session).
+
+    If successful, the caller can pass this token to Connect-ExchangeOnline
+    -AccessToken to avoid a second browser prompt.
+
+    Returns the token string, or None if silent acquisition fails (e.g. the
+    app hasn't been granted Exchange.Manage permission in this tenant).  The
+    caller should fall back to letting Connect-ExchangeOnline handle auth
+    interactively when None is returned.
+    """
+    cache = _load_cache()
+    app = _build_app(tenant_id, client_id, cache)
+    accounts = app.get_accounts()
+    if not accounts:
+        return None
+    result = app.acquire_token_silent(EXO_SCOPES, account=accounts[0])
     _save_cache(cache)
     if result and "access_token" in result:
         return result["access_token"]

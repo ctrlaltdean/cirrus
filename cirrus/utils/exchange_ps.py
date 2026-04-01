@@ -287,9 +287,16 @@ $ErrorActionPreference = 'Stop'
 try {
     Import-Module ExchangeOnlineManagement -ErrorAction Stop
 
-    $_connectArgs = @{ ShowBanner = $false; ErrorAction = 'Stop' }
-    if ($env:CIRRUS_EXO_UPN) { $_connectArgs['UserPrincipalName'] = $env:CIRRUS_EXO_UPN }
-    Connect-ExchangeOnline @_connectArgs
+    if ($env:CIRRUS_EXO_TOKEN) {
+        # Use the pre-acquired EXO token — no browser prompt needed.
+        $_sec = ConvertTo-SecureString $env:CIRRUS_EXO_TOKEN -AsPlainText -Force
+        Connect-ExchangeOnline -AccessToken $_sec -AccountId $env:CIRRUS_EXO_UPN `
+            -ShowBanner:$false -ErrorAction Stop
+    } else {
+        $_connectArgs = @{ ShowBanner = $false; ErrorAction = 'Stop' }
+        if ($env:CIRRUS_EXO_UPN) { $_connectArgs['UserPrincipalName'] = $env:CIRRUS_EXO_UPN }
+        Connect-ExchangeOnline @_connectArgs
+    }
 
     $result = [ordered]@{}
     $target = $env:CIRRUS_TARGET_UPN
@@ -329,6 +336,7 @@ try {
 def run_triage_mailbox_ps(
     target_upn: str,
     admin_upn: str | None = None,
+    exo_token: str | None = None,
 ) -> dict:
     """
     Collect inbox rules and mail forwarding settings for *target_upn* via
@@ -365,6 +373,7 @@ def run_triage_mailbox_ps(
         **os.environ,
         "CIRRUS_TARGET_UPN": target_upn,
         "CIRRUS_EXO_UPN": admin_upn or "",
+        "CIRRUS_EXO_TOKEN": exo_token or "",
     }
 
     try:

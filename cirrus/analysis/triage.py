@@ -59,6 +59,7 @@ _WARN_FLAG_PREFIXES = (
     "FORWARDS_TO:", "PERMANENT_DELETE", "HIGH_RISK_SCOPE:", "RISK_LEVEL:medium",
     "ROLE_ASSIGNMENT:", "MFA_METHOD_ADDED", "MULTIPLE_PHONE", "LEGACY_AUTH:",
     "SINGLE_FACTOR_SUCCESS", "FAILED_SIGNIN:", "MOVES_TO_HIDDEN_FOLDER:",
+    "SUSPICIOUS_RULE_NAME:", "SUSPICIOUS_KEYWORD:",
 )
 
 # High-risk OAuth scopes
@@ -385,7 +386,11 @@ def _run_inbox_analysis(rules: list[dict]) -> tuple[CheckResult, list[dict]]:
     if not rules:
         return CheckResult(label, "clean", "No inbox rules configured"), rules
 
-    _HIDDEN = {"deleteditems", "junkemail", "rssfeedsroot", "drafts"}
+    # Folders that are commonly used to hide mail from the victim
+    _HIDDEN = {
+        "deleteditems", "junkemail", "rssfeedsroot", "drafts",
+        "conversationhistory",   # Teams/Skype conversation sync folder — attacker favourite
+    }
     _FINANCE_KW = {"invoice", "wire", "payment", "transfer", "bank", "remittance",
                    "ach", "routing", "account number", "urgent", "confidential"}
 
@@ -393,8 +398,13 @@ def _run_inbox_analysis(rules: list[dict]) -> tuple[CheckResult, list[dict]]:
     suspicious: list[str] = []
 
     for rule in rules:
+        name = (rule.get("displayName") or "").strip()
         actions = rule.get("actions") or {}
         conditions = rule.get("conditions") or {}
+
+        # Flag suspiciously short or blank rule names — common attacker evasion
+        if len(name) <= 2:
+            flags.append(f"SUSPICIOUS_RULE_NAME:{name!r}")
 
         for addr in (actions.get("forwardTo") or []):
             email = (addr.get("emailAddress") or {}).get("address") or ""
@@ -811,9 +821,20 @@ def run_triage(
     # ------------------------------------------------------------------ #
     mailbox_role_missing = False
     if graph_mailbox_403:
+        # Try to get an EXO token silently so Connect-ExchangeOnline doesn't
+        # open a second browser prompt — uses the same MSAL refresh token.
+        exo_token: str | None = None
+        try:
+            tenant_id = _decode_token_tenant(token)
+            if tenant_id:
+                from cirrus.auth.authenticator import get_exo_token_silent
+                exo_token = get_exo_token_silent(tenant_id)
+        except Exception:
+            pass
+
         try:
             from cirrus.utils.exchange_ps import run_triage_mailbox_ps
-            ps_data = run_triage_mailbox_ps(upn)
+            ps_data = run_triage_mailbox_ps(upn, exo_token=exo_token)
         except Exception:
             ps_data = {"available": False, "error": "PowerShell fallback unavailable"}
 
@@ -920,6 +941,17 @@ def _normalize_ps_mailbox_forwarding(ps_mb: dict) -> dict:
         "forwardingAddress":           ps_mb.get("ForwardingAddress") or "",
         "deliverToMailboxAndForward":  ps_mb.get("DeliverToMailboxAndForward", True),
     }
+
+
+def _decode_token_tenant(token: str) -> str | None:
+    """Extract the tenant ID (tid claim) from the JWT access token."""
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        payload = _json.loads(base64.b64decode(payload_b64))
+        return payload.get("tid") or None
+    except Exception:
+        return None
 
 
 def decode_token_scopes(token: str) -> set[str]:
