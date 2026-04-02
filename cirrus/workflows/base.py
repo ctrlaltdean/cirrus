@@ -170,8 +170,7 @@ class BaseWorkflow:
 
                 # Open the NDJSON file before collection starts so records are
                 # streamed to disk page-by-page as they arrive.
-                ndjson_path = self.case.case_dir / f"{collector.name}.ndjson"
-                ndjson_path.parent.mkdir(parents=True, exist_ok=True)
+                ndjson_path = self.case.collection_dir / f"{collector.name}.ndjson"
 
                 self.case.audit.log_collection_start(
                     collector.name,
@@ -208,7 +207,7 @@ class BaseWorkflow:
                 ndjson_hash = file_sha256(ndjson_path)
 
                 json_path, csv_path, _, json_hash, csv_hash, _ = save_collection(
-                    records, self.case.case_dir, collector.name,
+                    records, self.case.collection_dir, collector.name,
                     prewritten_ndjson=ndjson_path,
                 )
                 ioc_count = sum(
@@ -369,6 +368,15 @@ def _run_correlation(case_dir: Path, result: "WorkflowResult", case: "Case") -> 
             console.print(f"[bold]Report:[/bold]  [cyan]{report_path}[/cyan]\n")
         except Exception as exc:
             console.print(f"[dim]HTML report skipped: {exc}[/dim]")
+
+        # Excel workbook
+        try:
+            from cirrus.output.excel import generate_workbook
+            wb_path = generate_workbook(case_dir)
+            if wb_path:
+                console.print(f"[bold]Workbook:[/bold] [cyan]{wb_path}[/cyan]\n")
+        except Exception as exc:
+            console.print(f"[dim]Excel workbook skipped: {exc}[/dim]")
 
     except Exception as exc:
         console.print(f"\n[dim]Correlation skipped: {exc}[/dim]")

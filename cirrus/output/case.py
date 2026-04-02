@@ -7,13 +7,17 @@ all artifacts from one investigation run.
 Folder structure:
     investigations/
     └── CONTOSO_20260317_143022/
-        ├── case_audit.jsonl        ← chain-of-custody log (JSONL)
-        ├── case_audit.txt          ← human-readable audit log
-        ├── signin_logs.json
-        ├── signin_logs.csv
-        ├── entra_audit_logs.json
-        ├── entra_audit_logs.csv
-        └── ...
+        ├── case_audit.jsonl            ← chain-of-custody log (JSONL)
+        ├── case_audit.txt              ← human-readable audit log
+        ├── ioc_correlation.json        ← cross-collector findings
+        ├── investigation_report.html   ← HTML report
+        ├── analysis.xlsx               ← master Excel workbook
+        ├── triage/                     ← quick-triage check outputs
+        │   ├── sign_ins.{json,csv,ndjson}
+        │   └── ...
+        └── collection/                 ← workflow collector outputs
+            ├── signin_logs.{json,csv,ndjson}
+            └── ...
 """
 
 from __future__ import annotations
@@ -58,6 +62,20 @@ class Case:
         if not case_dir.exists():
             raise FileNotFoundError(f"Case directory does not exist: {case_dir}")
         return cls(case_dir)
+
+    @property
+    def triage_dir(self) -> Path:
+        """Subfolder for quick-triage check outputs. Created on first access."""
+        p = self.case_dir / "triage"
+        p.mkdir(exist_ok=True)
+        return p
+
+    @property
+    def collection_dir(self) -> Path:
+        """Subfolder for workflow collector outputs. Created on first access."""
+        p = self.case_dir / "collection"
+        p.mkdir(exist_ok=True)
+        return p
 
     def artifact_path(self, name: str) -> Path:
         """Return the full path for a named artifact file inside the case folder."""

@@ -1704,7 +1704,8 @@ def triage(
 
     Creates a case folder containing:
       • triage_report.json       — structured findings (verdict, flags, checks)
-      • triage_<check>.json/csv/ndjson  — raw API records per check (SIEM-ready)
+      • triage/<check>.json/csv/ndjson  — raw API records per check (SIEM-ready)
+      • analysis.xlsx            — all triage CSVs in a single Excel workbook
       • case_audit.jsonl         — tamper-evident chain-of-custody log
 
     Add [bold]--workflow[/bold] to also run the full BEC+ATO collection into the
@@ -1821,10 +1822,10 @@ def triage(
         if not records:
             continue
         json_path, csv_path, ndjson_path, json_hash, csv_hash, ndjson_hash = save_collection(
-            records, case.case_dir, f"triage_{check_key}"
+            records, case.triage_dir, check_key
         )
         case.audit.log_collection_complete(
-            f"triage_{check_key}", len(records), json_path, json_hash
+            check_key, len(records), json_path, json_hash
         )
 
     # ── Save structured triage_report.json ────────────────────────────────
@@ -1891,6 +1892,12 @@ def triage(
 
     case.audit.log_event("TRIAGE_COMPLETE", {"overall_verdict": overall_verdict})
     case.close()
+
+    # ── Excel workbook ─────────────────────────────────────────────────────
+    from cirrus.output.excel import generate_workbook
+    wb_path = generate_workbook(case.case_dir)
+    if wb_path:
+        console.print(f"\n[bold]Workbook:[/bold] [cyan]{wb_path}[/cyan]")
 
     # ── Final handoff summary ──────────────────────────────────────────────
     _render_triage_handoff(
@@ -2625,6 +2632,12 @@ def analyze(
     from cirrus.analysis.report import generate_report
     report_path = generate_report(case_dir)
     console.print(f"[bold]Report:[/bold] [cyan]{report_path}[/cyan]\n")
+
+    # Excel workbook
+    from cirrus.output.excel import generate_workbook
+    wb_path = generate_workbook(case_dir)
+    if wb_path:
+        console.print(f"[bold]Workbook:[/bold] [cyan]{wb_path}[/cyan]\n")
 
 
 # ---------------------------------------------------------------------------
