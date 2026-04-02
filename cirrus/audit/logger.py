@@ -21,6 +21,14 @@ from typing import Any
 from cirrus.utils.helpers import utc_now
 
 
+def _get_analyst() -> str:
+    """Return the OS username, falling back gracefully when there is no TTY."""
+    try:
+        return os.getlogin()
+    except OSError:
+        return os.environ.get("USERNAME", os.environ.get("USER", "unknown"))
+
+
 class AuditLogger:
     """
     Append-only audit log for a single investigation case.
@@ -82,7 +90,7 @@ class AuditLogger:
     ) -> None:
         entry: dict[str, Any] = {
             "timestamp": utc_now(),
-            "analyst": os.getlogin() if hasattr(os, "getlogin") else os.environ.get("USERNAME", os.environ.get("USER", "unknown")),
+            "analyst": _get_analyst(),
             "hostname": socket.gethostname(),
             "platform": platform.platform(),
             "action": action,
