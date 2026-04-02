@@ -123,7 +123,8 @@ def save_collection(
 
     Returns (json_path, csv_path, ndjson_path, json_sha256, csv_sha256, ndjson_sha256).
     """
-    json_path = case_dir / f"{base_name}.json"
+    json_dir = case_dir / "json"
+    json_path = json_dir / f"{base_name}.json"
     csv_path = case_dir / f"{base_name}.csv"
     json_hash = write_json(records, json_path)
     csv_hash = write_csv(records, csv_path)
@@ -132,7 +133,7 @@ def save_collection(
         ndjson_path = prewritten_ndjson
         ndjson_hash = file_sha256(ndjson_path)
     else:
-        ndjson_path = case_dir / f"{base_name}.ndjson"
+        ndjson_path = json_dir / f"{base_name}.ndjson"
         ndjson_hash = write_ndjson(
             ndjson_records if ndjson_records is not None else records, ndjson_path
         )

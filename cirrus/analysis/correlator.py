@@ -363,7 +363,9 @@ class CorrelationEngine:
 
     def _load(self) -> None:
         for key, filename in _COLLECTOR_FILES.items():
-            path = self.case_dir / "collection" / filename
+            path = self.case_dir / "collection" / "json" / filename
+            if not path.exists():
+                path = self.case_dir / "collection" / filename  # pre-json-subdir
             if not path.exists():
                 path = self.case_dir / filename  # backward compat: flat structure
             if path.exists():

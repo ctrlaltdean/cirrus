@@ -214,7 +214,9 @@ def _load_data(case_dir: Path) -> dict[str, list[dict]]:
     """Load all available collector JSON files."""
     data: dict[str, list[dict]] = {}
     for key, cfg in _COLLECTOR_CONFIG.items():
-        path = case_dir / "collection" / cfg["filename"]
+        path = case_dir / "collection" / "json" / cfg["filename"]
+        if not path.exists():
+            path = case_dir / "collection" / cfg["filename"]  # pre-json-subdir
         if not path.exists():
             path = case_dir / cfg["filename"]  # backward compat: flat structure
         if path.exists():

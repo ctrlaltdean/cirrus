@@ -13,11 +13,15 @@ Folder structure:
         ├── investigation_report.html   ← HTML report
         ├── analysis.xlsx               ← master Excel workbook
         ├── triage/                     ← quick-triage check outputs
-        │   ├── sign_ins.{json,csv,ndjson}
-        │   └── ...
+        │   ├── sign_ins.csv
+        │   └── json/
+        │       ├── sign_ins.json
+        │       └── sign_ins.ndjson
         └── collection/                 ← workflow collector outputs
-            ├── signin_logs.{json,csv,ndjson}
-            └── ...
+            ├── signin_logs.csv
+            └── json/
+                ├── signin_logs.json
+                └── signin_logs.ndjson
 """
 
 from __future__ import annotations

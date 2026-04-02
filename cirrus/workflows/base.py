@@ -170,7 +170,8 @@ class BaseWorkflow:
 
                 # Open the NDJSON file before collection starts so records are
                 # streamed to disk page-by-page as they arrive.
-                ndjson_path = self.case.collection_dir / f"{collector.name}.ndjson"
+                ndjson_path = self.case.collection_dir / "json" / f"{collector.name}.ndjson"
+                ndjson_path.parent.mkdir(parents=True, exist_ok=True)
 
                 self.case.audit.log_collection_start(
                     collector.name,
