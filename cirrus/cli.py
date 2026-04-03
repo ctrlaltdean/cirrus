@@ -1819,8 +1819,6 @@ def triage(
 
     console.print("\n[dim]Saving triage evidence to case folder...[/dim]")
     for check_key, records in all_raw.items():
-        if not records:
-            continue
         json_path, csv_path, ndjson_path, json_hash, csv_hash, ndjson_hash = save_collection(
             records, case.triage_dir, check_key
         )

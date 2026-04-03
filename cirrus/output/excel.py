@@ -67,8 +67,6 @@ def generate_workbook(case_dir: Path) -> Path | None:
         if not d.exists():
             continue
         for csv_path in sorted(d.glob("*.csv")):
-            if csv_path.stat().st_size == 0:
-                continue
             name = _sheet_name(csv_path.stem, seen_names)
             seen_names.add(name)
             entries.append((name, csv_path, colour))
@@ -86,10 +84,21 @@ def generate_workbook(case_dir: Path) -> Path | None:
         except Exception:
             continue
 
-        if not rows:
-            continue
-
         ws = wb.create_sheet(title=sheet_name)
+
+        if not rows:
+            # Check ran but returned no records — show a placeholder so the
+            # analyst knows the check executed and was clean.
+            header_font = Font(bold=True, color=_HEADER_TEXT)
+            header_fill = PatternFill("solid", fgColor=hdr_colour)
+            header_align = Alignment(horizontal="center", vertical="center", wrap_text=False)
+            cell = ws.cell(row=1, column=1, value="(no records)")
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            ws.column_dimensions["A"].width = 20
+            ws.row_dimensions[1].height = 18
+            continue
         ws.freeze_panes = "A2"
 
         header_font = Font(bold=True, color=_HEADER_TEXT)
