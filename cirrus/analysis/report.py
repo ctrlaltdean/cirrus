@@ -20,7 +20,7 @@ from __future__ import annotations
 import html
 import json
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -606,6 +606,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 .collector-name { font-size: 11px; color: var(--muted); display: inline-block;
                   min-width: 140px; }
 
+/* Swim-lane chart event circles */
+.sv-event { transition: opacity 0.15s; opacity: 0.85; }
+.sv-event:hover { opacity: 1 !important; }
+
 /* Footer */
 .report-footer { padding: 20px 32px; color: var(--muted); font-size: 12px;
                  border-top: 1px solid var(--border); margin-top: 16px; }
@@ -808,6 +812,153 @@ def _html_correlation_tab(corr: dict) -> str:
     )
 
 
+def _html_swim_lane_chart(timeline: list) -> str:
+    """
+    Build a self-contained SVG swim-lane chart from timeline events.
+
+    X axis = time.  Y axis = one horizontal lane per collector.
+    Circles are coloured by severity (red / orange / grey).
+    SVG <title> elements provide hover tooltips.
+    Events are drawn low→high so high-severity circles sit on top.
+    Returns an HTML fragment, or empty string when timeline is empty.
+    """
+    if not timeline:
+        return ""
+
+    # Build ordered lane list (first-appearance order)
+    seen_lanes: dict[str, int] = {}
+    for ev in timeline:
+        ct = ev["collector_title"]
+        if ct not in seen_lanes:
+            seen_lanes[ct] = len(seen_lanes)
+    lanes = list(seen_lanes.keys())
+
+    # Determine time range
+    _min_dt = datetime.min.replace(tzinfo=timezone.utc)
+    ts_values = [ev["timestamp_sort"] for ev in timeline if ev["timestamp_sort"] != _min_dt]
+    has_time = len(ts_values) >= 2
+    if has_time:
+        t_min = min(ts_values)
+        t_max = max(ts_values)
+        span = max((t_max - t_min).total_seconds(), 1.0)
+    else:
+        t_min = t_max = None
+        span = 1.0
+
+    LABEL_W  = 160
+    INNER_W  = 700
+    LANE_H   = 40
+    TOP_PAD  = 36
+    RIGHT_PAD = 20
+    LEGEND_H  = 44
+    n_lanes  = len(lanes)
+    chart_h  = TOP_PAD + n_lanes * LANE_H + LEGEND_H
+    chart_w  = LABEL_W + INNER_W + RIGHT_PAD
+
+    def _cx(ts: datetime) -> float:
+        if not has_time or t_min is None or ts == _min_dt:
+            return LABEL_W + INNER_W / 2
+        secs = (ts - t_min).total_seconds()
+        return LABEL_W + (secs / span) * INNER_W
+
+    parts: list[str] = []
+    parts.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{chart_w}" height="{chart_h}" '
+        f'style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">'
+    )
+
+    # Lane backgrounds and labels
+    for i, lane in enumerate(lanes):
+        y  = TOP_PAD + i * LANE_H
+        bg = "#f8fafc" if i % 2 == 0 else "#ffffff"
+        parts.append(f'<rect x="0" y="{y}" width="{chart_w}" height="{LANE_H}" fill="{bg}"/>')
+        ly = y + LANE_H / 2 + 4
+        parts.append(
+            f'<text x="{LABEL_W - 8}" y="{ly:.1f}" text-anchor="end" '
+            f'font-size="11" fill="#64748b" font-weight="500">{_e(lane[:24])}</text>'
+        )
+        parts.append(
+            f'<line x1="0" y1="{y + LANE_H}" x2="{chart_w}" y2="{y + LANE_H}" '
+            f'stroke="#e2e8f0" stroke-width="1"/>'
+        )
+
+    # Vertical divider between labels and plot area
+    parts.append(
+        f'<line x1="{LABEL_W}" y1="{TOP_PAD}" x2="{LABEL_W}" '
+        f'y2="{TOP_PAD + n_lanes * LANE_H}" stroke="#cbd5e1" stroke-width="1"/>'
+    )
+
+    # Time-axis tick marks and grid lines
+    if has_time:
+        n_ticks = 6
+        for i in range(n_ticks + 1):
+            frac  = i / n_ticks
+            x     = LABEL_W + frac * INNER_W
+            tick_dt = t_min + timedelta(seconds=frac * span)
+            if span > 86400:
+                label = tick_dt.strftime("%m/%d %H:%M")
+            elif span > 3600:
+                label = tick_dt.strftime("%H:%M")
+            else:
+                label = tick_dt.strftime("%H:%M:%S")
+            parts.append(
+                f'<line x1="{x:.1f}" y1="{TOP_PAD - 6}" x2="{x:.1f}" '
+                f'y2="{TOP_PAD + n_lanes * LANE_H}" stroke="#e2e8f0" '
+                f'stroke-width="1" stroke-dasharray="4,3"/>'
+            )
+            parts.append(
+                f'<text x="{x:.1f}" y="{TOP_PAD - 9}" text-anchor="middle" '
+                f'font-size="10" fill="#94a3b8">{_e(label)}</text>'
+            )
+
+    # Event circles — draw low→high so high-severity sits on top
+    _sev_order = {"low": 0, "medium": 1, "high": 2}
+    _sev_color = {"high": "#ef4444", "medium": "#f97316", "low": "#6b7280"}
+    R = 7
+
+    for ev in sorted(timeline, key=lambda e: _sev_order.get(e["severity"], 0)):
+        lane_idx = seen_lanes.get(ev["collector_title"], 0)
+        cy    = TOP_PAD + lane_idx * LANE_H + LANE_H / 2
+        cx    = _cx(ev["timestamp_sort"])
+        color = _sev_color.get(ev["severity"], "#6b7280")
+
+        ts_label   = _ts_display(ev["timestamp"])
+        user_label = f" · {ev['user']}" if ev["user"] else ""
+        flags_txt  = ", ".join(ev["flags"][:3])
+        if len(ev["flags"]) > 3:
+            flags_txt += f" +{len(ev['flags']) - 3}"
+        tooltip = f"{ts_label}{user_label}\n{ev['summary']}\n{flags_txt}"
+
+        parts.append(
+            f'<circle class="sv-event" cx="{cx:.1f}" cy="{cy:.1f}" r="{R}" '
+            f'fill="{color}" stroke="#fff" stroke-width="1.5">'
+            f'<title>{_e(tooltip)}</title>'
+            f'</circle>'
+        )
+
+    # Legend
+    ly = TOP_PAD + n_lanes * LANE_H + 16
+    parts.append(
+        f'<text x="{LABEL_W}" y="{ly + 4}" font-size="11" fill="#64748b" font-weight="600">Severity:</text>'
+    )
+    lx = LABEL_W + 70
+    for sev, color, label in (("high", "#ef4444", "High"), ("medium", "#f97316", "Medium"), ("low", "#6b7280", "Low")):
+        parts.append(f'<circle cx="{lx}" cy="{ly}" r="6" fill="{color}"/>')
+        parts.append(f'<text x="{lx + 10}" y="{ly + 4}" font-size="11" fill="#64748b">{label}</text>')
+        lx += 72
+
+    parts.append("</svg>")
+
+    return (
+        '<div style="overflow-x:auto;margin-bottom:24px;border:1px solid #e2e8f0;'
+        'border-radius:8px;background:#fff;padding:12px 0 4px 0">'
+        '<div style="font-size:12px;color:#64748b;padding:0 16px 6px;font-weight:600">'
+        'Event Swim-Lane Chart</div>'
+        + "".join(parts)
+        + "</div>"
+    )
+
+
 def _html_timeline_tab(timeline: list) -> str:
     if not timeline:
         return (
@@ -842,8 +993,9 @@ def _html_timeline_tab(timeline: list) -> str:
     return (
         f'<div class="tab-content" id="timeline">'
         f'<div class="section-title">IOC Timeline — {len(timeline)} flagged event(s)</div>'
-        f'<div class="timeline">{"".join(events_html)}</div>'
-        f'</div>'
+        + _html_swim_lane_chart(timeline)
+        + f'<div class="timeline">{"".join(events_html)}</div>'
+        + f'</div>'
     )
 
 

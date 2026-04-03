@@ -1897,6 +1897,14 @@ def triage(
     if wb_path:
         console.print(f"\n[bold]Workbook:[/bold] [cyan]{wb_path}[/cyan]")
 
+    # ── HTML report ────────────────────────────────────────────────────────
+    try:
+        from cirrus.analysis.report import generate_report
+        report_path = generate_report(case.case_dir)
+        console.print(f"[bold]Report:[/bold]   [cyan]{report_path}[/cyan]")
+    except Exception as exc:
+        console.print(f"[dim]HTML report skipped: {exc}[/dim]")
+
     # ── Final handoff summary ──────────────────────────────────────────────
     _render_triage_handoff(
         case_dir=case.case_dir,
