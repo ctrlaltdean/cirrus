@@ -381,10 +381,14 @@ def _run_inbox_analysis(rules: list[dict]) -> tuple[CheckResult, list[dict]]:
     """
     Pure analysis of a list of inbox rule dicts (Graph or normalized PS format).
     Extracted so it can be called by both the live check and the PS fallback.
+
+    Each rule is annotated with its own _iocFlags.  If any rule is suspicious,
+    ALL rules are returned so the analyst can manually review subject/keyword
+    conditions that generic checks do not catch.  Clean accounts return nothing.
     """
     label = "Inbox rules"
     if not rules:
-        return CheckResult(label, "clean", "No inbox rules configured"), rules
+        return CheckResult(label, "clean", "No inbox rules configured"), []
 
     # Folders that are commonly used to hide mail from the victim.
     # Include both the Graph well-known folder names (no spaces, lowercase)
@@ -399,50 +403,64 @@ def _run_inbox_analysis(rules: list[dict]) -> tuple[CheckResult, list[dict]]:
     _FINANCE_KW = {"invoice", "wire", "payment", "transfer", "bank", "remittance",
                    "ach", "routing", "account number", "urgent", "confidential"}
 
-    flags: list[str] = []
+    check_flags: list[str] = []
     suspicious: list[str] = []
+    any_flagged = False
 
     for rule in rules:
+        rule_flags: list[str] = []
         name = (rule.get("displayName") or "").strip()
         actions = rule.get("actions") or {}
         conditions = rule.get("conditions") or {}
 
         # Flag suspiciously short or blank rule names — common attacker evasion
         if len(name) <= 2:
-            flags.append(f"SUSPICIOUS_RULE_NAME:{name!r}")
+            rule_flags.append(f"SUSPICIOUS_RULE_NAME:{name!r}")
 
         for addr in (actions.get("forwardTo") or []):
             email = (addr.get("emailAddress") or {}).get("address") or ""
             if email:
-                flags.append(f"FORWARDS_TO:{email}")
+                rule_flags.append(f"FORWARDS_TO:{email}")
                 suspicious.append(f"forwards to {email}")
 
         for addr in (actions.get("redirectTo") or []):
             email = (addr.get("emailAddress") or {}).get("address") or ""
             if email:
-                flags.append(f"FORWARDS_TO:{email}")
+                rule_flags.append(f"FORWARDS_TO:{email}")
 
         if actions.get("permanentDelete"):
-            flags.append("PERMANENT_DELETE")
+            rule_flags.append("PERMANENT_DELETE")
             suspicious.append("permanently deletes mail")
 
         move_folder = (actions.get("moveToFolder") or "").lower()
         if any(h in move_folder for h in _HIDDEN):
-            flags.append(f"MOVES_TO_HIDDEN_FOLDER:{actions.get('moveToFolder')}")
+            rule_flags.append(f"MOVES_TO_HIDDEN_FOLDER:{actions.get('moveToFolder')}")
 
         if actions.get("markAsRead") and (actions.get("forwardTo") or actions.get("permanentDelete")):
-            flags.append("MARKS_AS_READ")
+            rule_flags.append("MARKS_AS_READ")
 
         for kw in ((conditions.get("bodyContains") or []) + (conditions.get("subjectContains") or [])):
             if kw.lower() in _FINANCE_KW:
-                flags.append(f"SUSPICIOUS_KEYWORD:{kw}")
+                rule_flags.append(f"SUSPICIOUS_KEYWORD:{kw}")
 
-    flags = list(dict.fromkeys(flags))
+        rule["_iocFlags"] = list(dict.fromkeys(rule_flags))
+        check_flags.extend(rule_flags)
+        if rule_flags:
+            any_flagged = True
+
+    check_flags = list(dict.fromkeys(check_flags))
     summary = f"{len(rules)} rule(s)"
     if suspicious:
         summary += f" — {'; '.join(suspicious[:3])}"
-    return CheckResult(label, _flag_status(flags) if flags else "clean", summary,
-                       list(dict.fromkeys(flags)), flags), rules
+
+    # If any rule is suspicious, return ALL rules so the analyst can manually
+    # review every condition — attackers often plant additional subject/keyword
+    # rules alongside the obvious forwarding rule that our checks don't flag.
+    # Clean accounts return nothing (no noise in the output).
+    records = rules if any_flagged else []
+
+    return CheckResult(label, _flag_status(check_flags) if check_flags else "clean", summary,
+                       list(dict.fromkeys(check_flags)), check_flags), records
 
 
 def _run_forwarding_analysis(upn: str, settings: dict) -> tuple[CheckResult, list[dict]]:
