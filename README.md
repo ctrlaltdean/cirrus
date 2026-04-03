@@ -29,8 +29,10 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
   - [Authentication](#authentication)
   - [Quick Triage](#quick-triage)
   - [IP Enrichment](#ip-enrichment)
+  - [Domain Enrichment](#domain-enrichment)
   - [Blast Radius](#blast-radius)
   - [Threat Hunt](#threat-hunt)
+  - [Compliance Audit](#compliance-audit)
   - [Investigation Workflows](#investigation-workflows)
     - [BEC — Business Email Compromise](#bec--business-email-compromise)
     - [ATO — Account Takeover](#ato--account-takeover)
@@ -71,7 +73,8 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 | **Multi-Tenant** | Authenticate to and collect from multiple client tenants independently |
 | **Flexible Targeting** | Single user, multiple users, file list, or entire tenant |
 | **Chain of Custody** | Tamper-evident SHA-256 hash chain audit log per case |
-| **Triple Output** | Every collector writes JSON + CSV + NDJSON (SOF-ELK ready) |
+| **Excel Master Workbook** | All triage and collection CSVs combined into `analysis.xlsx` — open directly in Excel for analyst review |
+| **Triple Output** | Every collector writes JSON + CSV + NDJSON (SOF-ELK ready); JSON/NDJSON organized into a `json/` subfolder to keep analyst-facing CSVs at the top level |
 | **IOC Flagging** | Collectors auto-annotate records with `_iocFlags` for quick triage |
 | **Auto-Update** | Checks for new releases in the background; update in one command |
 | **Standalone Executable** | Single file download — no Python required on analyst machines |
@@ -85,7 +88,7 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 ```bash
 cirrus triage --tenant contoso.com --user john@contoso.com
 ```
-Runs 8 checks in ~30 seconds and creates a case folder with `triage_report.json` and SIEM-ready NDJSON files for every check. Hand the folder to your cyber team.
+Runs 8 checks in ~30 seconds and creates a case folder with `triage_report.json`, SIEM-ready NDJSON, and `analysis.xlsx` for immediate review in Excel. Hand the folder to your cyber team.
 
 **Include full BEC+ATO collection in the same pass:**
 ```bash
@@ -347,18 +350,18 @@ Runs 8 targeted checks on a suspected compromised account **in parallel** and cr
 
 **Checks (all run simultaneously):**
 
-| Check | What it looks for | Output file |
+| Check | What it looks for | Output file (in `triage/`) |
 |---|---|---|
-| Sign-in activity | Unusual countries, impossible travel, device code/ROPC, legacy auth, risk signals | `triage_sign_ins` |
-| MFA methods | Recently added methods, FIDO2 keys, external email OTP, multiple authenticator apps | `triage_mfa_methods` |
-| Inbox rules | Forwarding rules, permanent delete, hidden-folder rules, finance keywords | `triage_inbox_rules` |
-| Mail forwarding | External SMTP forward, no-local-copy configuration | `triage_mail_forwarding` |
-| OAuth grants | High-risk scopes (Mail.Read, Files.ReadWrite.All, full_access_as_user, etc.) | `triage_oauth_grants` |
-| Registered devices | Recently registered, personal/BYOD devices | `triage_devices` |
-| Directory audit | MFA changes, admin password resets, role assignments in the window | `triage_audit_activity` |
-| Identity Protection | Risk state and risk level (skipped gracefully if no Entra ID P2) | `triage_risky_status` |
+| Sign-in activity | Unusual countries, impossible travel, device code/ROPC, legacy auth, risk signals | `sign_ins` |
+| MFA methods | Recently added methods, FIDO2 keys, external email OTP, multiple authenticator apps | `mfa_methods` |
+| Inbox rules | Forwarding rules, permanent delete, hidden-folder rules, finance keywords | `inbox_rules` |
+| Mail forwarding | External SMTP forward, no-local-copy configuration | `mail_forwarding` |
+| OAuth grants | High-risk scopes (Mail.Read, Files.ReadWrite.All, full_access_as_user, etc.) | `oauth_grants` |
+| Registered devices | Recently registered, personal/BYOD devices | `devices` |
+| Directory audit | MFA changes, admin password resets, role assignments in the window | `audit_activity` |
+| Identity Protection | Risk state and risk level (skipped gracefully if no Entra ID P2) | `risky_status` |
 
-Each check writes `.json`, `.csv`, and `.ndjson` (SOF-ELK / JSON Lines format) to the case folder. `triage_report.json` contains the full structured findings with verdict, flags, and check results for every user.
+Each check writes a `.csv` to `triage/` and `.json` / `.ndjson` to `triage/json/`. `triage_report.json` contains the full structured findings with verdict, flags, and check results for every user. When triage completes, `analysis.xlsx` is generated at the case root combining all triage CSVs into a single workbook.
 
 ```bash
 # Single user — creates case folder with triage evidence package
@@ -399,16 +402,21 @@ CONTOSO_20260317_143022/
 ├── case_audit.jsonl          ← tamper-evident chain-of-custody (SHA-256 chained)
 ├── case_audit.txt            ← human-readable audit log
 ├── triage_report.json        ← structured findings: verdict, flags, checks per user
-├── triage_sign_ins.json/.csv/.ndjson
-├── triage_mfa_methods.json/.csv/.ndjson
-├── triage_inbox_rules.json/.csv/.ndjson
-├── triage_mail_forwarding.json/.csv/.ndjson
-├── triage_oauth_grants.json/.csv/.ndjson
-├── triage_devices.json/.csv/.ndjson
-├── triage_audit_activity.json/.csv/.ndjson
-└── triage_risky_status.json/.csv/.ndjson
+├── analysis.xlsx             ← all triage CSVs in one Excel workbook
+├── triage/                   ← analyst-facing CSVs
+│   ├── sign_ins.csv
+│   ├── mfa_methods.csv
+│   ├── inbox_rules.csv
+│   ├── mail_forwarding.csv
+│   ├── oauth_grants.csv
+│   ├── devices.csv
+│   ├── audit_activity.csv
+│   ├── risky_status.csv
+│   └── json/                 ← SIEM / tool-format files
+│       ├── sign_ins.json / .ndjson
+│       └── ...
 ```
-With `--workflow`, the full BEC+ATO collector outputs are added to the same folder.
+With `--workflow`, the full BEC+ATO collector outputs are added to a `collection/` subfolder in the same case folder.
 
 **Sample terminal output:**
 ```
@@ -490,6 +498,38 @@ Output: investigations/CONTOSO_20260317_143022/ip_enrichment.json
 Once `ip_enrichment.json` exists, re-running `cirrus analyze` will automatically include:
 - An **IP Enrichment tab** in `investigation_report.html` with the full enrichment table
 - A new `hosting_provider_signin` correlation finding for any successful sign-in from a datacenter, proxy, or Tor IP
+
+---
+
+### Domain Enrichment
+
+Extracts external domains from IOC flags in collector output (forwarding addresses, SMTP forward targets, external email OTP addresses) and enriches each with registration data and DNS checks. No API key required.
+
+**Data collected per domain:**
+
+| Check | Source |
+|-------|--------|
+| Registration date and domain age | RDAP (via IANA bootstrap) |
+| Registrar name | RDAP |
+| MX records — routes to consumer provider? | DNS |
+| SPF record present | DNS TXT |
+| DMARC record present | DNS TXT `_dmarc.*` |
+
+**Threat tags applied automatically:**
+
+| Tag | Meaning |
+|-----|---------|
+| `NEW_DOMAIN` | Domain registered within the last 30 days |
+| `CONSUMER_MX` | Mail routes to Gmail, Outlook.com, Yahoo, etc. |
+| `NO_MX` | Domain has no mail exchanger |
+| `NO_SPF` | No SPF record — domain can be freely spoofed |
+| `NO_DMARC` | No DMARC record — no enforcement policy |
+
+```bash
+cirrus enrich-domains investigations/CONTOSO_20260317_143022
+```
+
+Writes `domain_enrichment.json` to the case folder. A **Domains tab** appears in `investigation_report.html` when you next run `cirrus analyze`.
 
 ---
 
@@ -770,6 +810,7 @@ It writes:
 - `ioc_correlation.json` — machine-readable findings (SIEM-ingestible)
 - `ioc_correlation.txt` — formatted text report for case notes
 - `investigation_report.html` — full self-contained HTML investigation report
+- `analysis.xlsx` — all triage and collection CSVs combined into a single Excel workbook
 
 See [Cross-Collector Correlation](#cross-collector-correlation) for the full list of detection rules.
 
@@ -916,39 +957,57 @@ cirrus deps install
 
 ## Output Structure
 
-Every workflow run creates a timestamped case folder:
+Every workflow run creates a timestamped case folder. Analyst-facing CSVs sit at the top level of each subfolder; JSON and NDJSON are grouped under `json/` to keep SIEM-format files out of the way:
 
 ```
 investigations/
 └── CONTOSO_20260317_143022/
     ├── case_audit.jsonl                ← tamper-evident chain-of-custody log
     ├── case_audit.txt                  ← human-readable audit log
+    ├── triage_report.json              ← structured triage findings (triage runs only)
+    ├── ioc_correlation.json            ← cross-collector findings (machine-readable)
+    ├── ioc_correlation.txt             ← formatted correlation report
+    ├── investigation_report.html       ← self-contained HTML investigation report
+    ├── analysis.xlsx                   ← all triage + collection CSVs in one workbook
     │
-    ├── users.json / .csv / .ndjson
-    ├── signin_logs.json / .csv / .ndjson
-    ├── entra_audit_logs.json / .csv / .ndjson
-    ├── risky_users.json / .csv / .ndjson
-    ├── risky_signins.json / .csv / .ndjson
-    ├── mfa_methods.json / .csv / .ndjson
-    ├── registered_devices.json / .csv / .ndjson   ← ATO / BEC+ATO workflows
-    ├── app_registrations.json / .csv / .ndjson    ← ATO / BEC+ATO workflows
-    ├── mailbox_rules.json / .csv / .ndjson
-    ├── mail_forwarding.json / .csv / .ndjson
-    ├── oauth_grants.json / .csv / .ndjson
-    ├── conditional_access_policies.json / .csv / .ndjson
-    ├── service_principals.json / .csv / .ndjson   ← full workflow only
-    ├── unified_audit_log.json / .csv / .ndjson    ← UAL NDJSON is SOF-ELK normalized
+    ├── triage/                         ← quick-triage check outputs
+    │   ├── sign_ins.csv
+    │   ├── mfa_methods.csv
+    │   ├── inbox_rules.csv
+    │   ├── mail_forwarding.csv
+    │   ├── oauth_grants.csv
+    │   ├── devices.csv
+    │   ├── audit_activity.csv
+    │   ├── risky_status.csv
+    │   └── json/                       ← SIEM / tool-format files
+    │       ├── sign_ins.json / .ndjson
+    │       └── ...
     │
-    ├── ioc_correlation.json                        ← cross-collector findings (machine-readable)
-    ├── ioc_correlation.txt                         ← formatted correlation report
-    ├── investigation_report.html                   ← self-contained HTML investigation report
-    │
-    └── compliance_audit.json / .csv / .txt        ← audit workflow only
+    └── collection/                     ← workflow collector outputs
+        ├── users.csv
+        ├── signin_logs.csv
+        ├── entra_audit_logs.csv
+        ├── mfa_methods.csv
+        ├── risky_users.csv             ← P2 license required
+        ├── risky_signins.csv           ← P2 license required
+        ├── registered_devices.csv      ← ATO / BEC+ATO workflows
+        ├── app_registrations.csv       ← ATO / BEC+ATO workflows
+        ├── mailbox_rules.csv
+        ├── mail_forwarding.csv
+        ├── oauth_grants.csv
+        ├── conditional_access_policies.csv  ← P1 license required
+        ├── sp_signin_logs.csv          ← P1 license required
+        ├── service_principals.csv      ← full workflow only
+        ├── unified_audit_log.csv
+        └── json/                       ← SIEM / tool-format files
+            ├── signin_logs.json / .ndjson
+            ├── unified_audit_log.json / .ndjson   ← UAL NDJSON is SOF-ELK normalized
+            └── ...
 ```
 
 Each collector produces three output files:
 - **`.json`** — Pretty-printed JSON array. Human-readable, easy to open in any editor or `jq`.
-- **`.csv`** — Flattened CSV. Import directly into Excel or SIEM ingestion pipelines.
+- **`.csv`** — Flattened CSV in `triage/` or `collection/`. Analyst-facing; also the source for `analysis.xlsx`.
 - **`.ndjson`** — JSON Lines (one object per line). Ready for SOF-ELK, Elastic, or any Logstash pipeline.
 
 ### SOF-ELK Ingestion
@@ -962,10 +1021,10 @@ Each collector produces three output files:
 | `entra_audit_logs.ndjson` | `/logstash/azure/` |
 
 ```bash
-scp investigations/CONTOSO_20260317_143022/unified_audit_log.ndjson \
+scp investigations/CONTOSO_20260317_143022/collection/json/unified_audit_log.ndjson \
     analyst@sofelk:/logstash/microsoft365/
 
-scp investigations/CONTOSO_20260317_143022/signin_logs.ndjson \
+scp investigations/CONTOSO_20260317_143022/collection/json/signin_logs.ndjson \
     analyst@sofelk:/logstash/azure/
 ```
 
