@@ -67,7 +67,7 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 | **BEC+ATO Workflow** | Combined 13-step full attack chain — most BEC incidents begin with an ATO event |
 | **Full Tenant Sweep** | Complete collection across all supported data sources |
 | **Cross-Collector Correlation** | Post-collection engine links events across collectors to surface multi-source attack patterns including hosting-provider sign-ins |
-| **HTML Investigation Report** | Single self-contained HTML report with correlation findings, IOC timeline, IP enrichment tab, and per-collector tables |
+| **HTML Investigation Report** | Single self-contained HTML report with correlation findings, SVG swim-lane timeline chart, IOC event list, IP enrichment tab, and per-collector tables |
 | **CIS Compliance Audit** | 34 checks against CIS M365 & Entra ID Benchmarks with wizard UI |
 | **License-Aware Collection** | Detects tenant license tier (P1/P2/E5) and gracefully skips unsupported endpoints |
 | **Multi-Tenant** | Authenticate to and collect from multiple client tenants independently |
@@ -88,7 +88,7 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 ```bash
 cirrus triage --tenant contoso.com --user john@contoso.com
 ```
-Runs 8 checks in ~30 seconds and creates a case folder with `triage_report.json`, SIEM-ready NDJSON, and `analysis.xlsx` for immediate review in Excel. Hand the folder to your cyber team.
+Runs 8 checks in ~30 seconds and creates a case folder with `triage_report.json`, `investigation_report.html`, SIEM-ready NDJSON, and `analysis.xlsx` for immediate review in Excel. Hand the folder to your cyber team.
 
 **Include full BEC+ATO collection in the same pass:**
 ```bash
@@ -361,7 +361,7 @@ Runs 8 targeted checks on a suspected compromised account **in parallel** and cr
 | Directory audit | MFA changes, admin password resets, role assignments in the window | `audit_activity` |
 | Identity Protection | Risk state and risk level (skipped gracefully if no Entra ID P2) | `risky_status` |
 
-Each check writes a `.csv` to `triage/` and `.json` / `.ndjson` to `triage/json/`. `triage_report.json` contains the full structured findings with verdict, flags, and check results for every user. When triage completes, `analysis.xlsx` is generated at the case root combining all triage CSVs into a single workbook.
+Each check writes a `.csv` to `triage/` and `.json` / `.ndjson` to `triage/json/`. `triage_report.json` contains the full structured findings with verdict, flags, and check results for every user. When triage completes, `analysis.xlsx` and `investigation_report.html` are generated at the case root — the workbook for Excel review, the HTML report for browser-based investigation.
 
 ```bash
 # Single user — creates case folder with triage evidence package
@@ -403,6 +403,7 @@ CONTOSO_20260317_143022/
 ├── case_audit.txt            ← human-readable audit log
 ├── triage_report.json        ← structured findings: verdict, flags, checks per user
 ├── analysis.xlsx             ← all triage CSVs in one Excel workbook
+├── investigation_report.html ← self-contained HTML report (swim-lane chart, IOC timeline, per-user summary)
 ├── triage/                   ← analyst-facing CSVs
 │   ├── sign_ins.csv
 │   ├── mfa_methods.csv
@@ -1202,7 +1203,7 @@ cirrus analyze investigations/CONTOSO_20260317_143022
 Three output files are written to the case folder:
 - `ioc_correlation.json` — machine-readable findings (suitable for SIEM ingestion)
 - `ioc_correlation.txt` — formatted report for analyst review and case documentation
-- `investigation_report.html` — self-contained HTML report with correlation findings, IOC timeline, per-user summary, per-collector flagged record tables, and optional IP enrichment tab
+- `investigation_report.html` — self-contained HTML report with correlation findings, SVG swim-lane timeline chart, IOC event list, per-user summary, per-collector flagged record tables, and optional IP/domain enrichment tabs
 
 ---
 
@@ -1269,7 +1270,7 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 - [x] Additional correlation rules: password spray, mass mail access, hosting-provider sign-in (11 rules total)
 - [x] Triage handoff package — `cirrus triage` now creates a case folder with SIEM-ready NDJSON per check, `triage_report.json` (structured verdict + flags), and chain-of-custody audit log; `--workflow` adds full BEC+ATO collection in the same pass; `cirrus run bec/ato/bec-ato` accept `--existing-case` to extend a triage case
 - [x] Quick triage command (`cirrus triage`) — 8 parallel checks, results in seconds
-- [x] HTML investigation report (`investigation_report.html`) — self-contained, print-friendly, offline-capable, with IP enrichment tab
+- [x] HTML investigation report (`investigation_report.html`) — self-contained, print-friendly, offline-capable; generated after both triage and workflow runs; includes SVG swim-lane timeline chart, IP enrichment tab, domain enrichment tab, remediation checklist
 - [x] Cross-collector correlation engine (auto-runs after every workflow)
 - [x] Account Takeover (ATO) investigation workflow
 - [x] BEC+ATO combined full attack chain workflow
