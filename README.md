@@ -30,6 +30,7 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
   - [Quick Triage](#quick-triage)
   - [IP Enrichment](#ip-enrichment)
   - [Blast Radius](#blast-radius)
+  - [Threat Hunt](#threat-hunt)
   - [Investigation Workflows](#investigation-workflows)
     - [BEC — Business Email Compromise](#bec--business-email-compromise)
     - [ATO — Account Takeover](#ato--account-takeover)
@@ -545,6 +546,50 @@ cirrus blast-radius
 ```
 
 If `--case-dir` is provided, results are written to `blast_radius.json` in that folder.
+
+---
+
+### Threat Hunt
+
+Performs a proactive tenant-wide threat hunt without a known starting account. Runs 5 checks in parallel and surfaces suspicious targets ranked by signal count. Use this for initial discovery before pivoting to a targeted triage or workflow run.
+
+**Hunt checks:**
+
+| Check | What it surfaces |
+|---|---|
+| Sign-in anomalies | Accounts with device code auth, impossible travel, legacy auth, or high Identity Protection risk scores |
+| Stale accounts | Enabled, licensed accounts with no sign-in activity in the last N days (default 90) — prime low-noise ATO targets |
+| Risky OAuth apps | Apps with high-risk scopes (Mail.Read, Files.ReadWrite.All, etc.) consented by multiple users or via admin consent for all users |
+| Password spray | Source IPs attempting authentication against many distinct accounts within a short window |
+| Privileged new accounts | Recently created accounts that already hold a privileged directory role |
+
+```bash
+# Hunt across the last 30 days (default)
+cirrus hunt --tenant contoso.com
+
+# Shorter window
+cirrus hunt --tenant contoso.com --days 14
+
+# Adjust stale account threshold
+cirrus hunt --tenant contoso.com --stale-days 60
+
+# Interactive wizard
+cirrus hunt
+```
+
+**Sample output:**
+```
+                    Hunt Results — 3 suspicious target(s)
+┏━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Severity ┃ Type   ┃ Target                         ┃ Signals ┃ Top Signal                          ┃
+┡━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ HIGH     │ user   │ john@contoso.com               │       3 │ device_code sign-in from 185.x.x.x  │
+│ HIGH     │ app    │ Contoso Reporting App           │       2 │ Mail.ReadWrite consented by 14 users │
+│ MEDIUM   │ ip     │ 185.220.101.45                 │       1 │ spray: 47 targets, 3 successes       │
+└──────────┴────────┴────────────────────────────────┴─────────┴─────────────────────────────────────┘
+```
+
+No case folder is created — use `cirrus triage` or a workflow command to collect evidence on flagged accounts.
 
 ---
 
@@ -1141,7 +1186,6 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 
 **In progress / next up:**
 - [ ] Service principal sign-in logs collector — closes the blind spot where attackers pivot to OAuth app tokens after initial compromise; separate Graph endpoint from user sign-ins
-- [ ] Tenant-wide hunt (`cirrus hunt`) — surface suspicious accounts and risky OAuth apps across the whole tenant without a known starting account
 - [ ] Tenant-wide OAuth app inventory — which apps have been granted consent across the tenant in the last N days; identifies rogue app phishing campaigns
 - [ ] MITRE ATT&CK mapping — attach technique IDs (T1078, T1528, T1110.003, etc.) to correlation findings for SIEM integration and reporting
 - [ ] Remediation checklist — dedicated report section mapping each finding to a prioritised, checkbox-style action list
@@ -1159,6 +1203,7 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 - [x] Domain enrichment (`cirrus enrich-domains`) — RDAP registration age and MX/SPF/DMARC lookups on forwarding destinations and external email addresses
 - [x] VirusTotal enrichment — extend `cirrus enrich --vt-key` with VT IP reputation alongside AbuseIPDB
 - [x] Conditional Access coverage gaps — correlation rule identifies successful sign-ins that matched zero CA policies (T1078)
+- [x] Tenant-wide threat hunt (`cirrus hunt`) — 5 parallel checks surface suspicious accounts, risky OAuth apps, password spray sources, and stale licensed accounts across the whole tenant without a known starting account
 - [x] Stale account enumeration — `cirrus hunt` flags enabled/licensed users with no sign-in in 90+ days (prime low-noise ATO targets)
 - [x] IP enrichment (`cirrus enrich`) — geo/ASN/hosting/proxy/Tor via ip-api.com + optional AbuseIPDB abuse scoring
 - [x] Blast radius assessment (`cirrus blast-radius`) — 6 parallel Graph API checks mapping account access footprint
