@@ -172,6 +172,46 @@ _COLLECTOR_CONFIG: dict[str, dict] = {
             ("Result",          "status.errorCode"),
         ],
     },
+    "risky_users": {
+        "title": "Risky Users",
+        "filename": "risky_users.json",
+        "timestamp_key": "riskLastUpdatedDateTime",
+        "user_key": "userPrincipalName",
+        "columns": [
+            ("User",            "userPrincipalName"),
+            ("Display Name",    "userDisplayName"),
+            ("Risk Level",      "riskLevel"),
+            ("Risk State",      "riskState"),
+            ("Risk Detail",     "riskDetail"),
+            ("Last Updated",    "riskLastUpdatedDateTime"),
+        ],
+    },
+    "service_principals": {
+        "title": "Service Principals",
+        "filename": "service_principals.json",
+        "timestamp_key": "createdDateTime",
+        "user_key": "",
+        "columns": [
+            ("Display Name",    "displayName"),
+            ("App ID",          "appId"),
+            ("Type",            "servicePrincipalType"),
+            ("Publisher",       "publisherName"),
+            ("Enabled",         "accountEnabled"),
+            ("Created",         "createdDateTime"),
+        ],
+    },
+    "conditional_access_policies": {
+        "title": "Conditional Access Policies",
+        "filename": "conditional_access_policies.json",
+        "timestamp_key": "modifiedDateTime",
+        "user_key": "",
+        "columns": [
+            ("Policy Name",     "displayName"),
+            ("State",           "state"),
+            ("Created",         "createdDateTime"),
+            ("Modified",        "modifiedDateTime"),
+        ],
+    },
 }
 
 _SEV_COLOR = {"high": "#ef4444", "medium": "#f97316", "low": "#6b7280"}
@@ -820,12 +860,25 @@ def _html_swim_lane_chart(timeline: list) -> str:
     Circles are coloured by severity (red / orange / grey).
     SVG <title> elements provide hover tooltips.
     Events are drawn low→high so high-severity circles sit on top.
+
+    Events that have no timestamp (mailbox rules, mail forwarding, OAuth grants)
+    are placed in a separate "No Timestamp" column on the right side of the chart,
+    staggered so they do not overlap.  This prevents the misleading cluster at the
+    horizontal midpoint that would otherwise occur.
+
     Returns an HTML fragment, or empty string when timeline is empty.
     """
     if not timeline:
         return ""
 
-    # Build ordered lane list (first-appearance order)
+    _min_dt = datetime.min.replace(tzinfo=timezone.utc)
+
+    # Separate events into timestamped and no-timestamp groups
+    timed_events  = [ev for ev in timeline if ev["timestamp_sort"] != _min_dt]
+    no_ts_events  = [ev for ev in timeline if ev["timestamp_sort"] == _min_dt]
+    has_no_ts     = bool(no_ts_events)
+
+    # Build ordered lane list (first-appearance order, across all events)
     seen_lanes: dict[str, int] = {}
     for ev in timeline:
         ct = ev["collector_title"]
@@ -833,32 +886,30 @@ def _html_swim_lane_chart(timeline: list) -> str:
             seen_lanes[ct] = len(seen_lanes)
     lanes = list(seen_lanes.keys())
 
-    # Determine time range
-    _min_dt = datetime.min.replace(tzinfo=timezone.utc)
-    ts_values = [ev["timestamp_sort"] for ev in timeline if ev["timestamp_sort"] != _min_dt]
-    has_time = len(ts_values) >= 2
+    # Determine time range from timestamped events only
+    has_time = len(timed_events) >= 2
     if has_time:
-        t_min = min(ts_values)
-        t_max = max(ts_values)
-        span = max((t_max - t_min).total_seconds(), 1.0)
+        t_min = min(ev["timestamp_sort"] for ev in timed_events)
+        t_max = max(ev["timestamp_sort"] for ev in timed_events)
+        span  = max((t_max - t_min).total_seconds(), 1.0)
     else:
         t_min = t_max = None
-        span = 1.0
+        span  = 1.0
 
-    LABEL_W  = 160
-    INNER_W  = 700
-    LANE_H   = 40
-    TOP_PAD  = 36
-    RIGHT_PAD = 20
+    LABEL_W   = 160
+    INNER_W   = 650   # time-axis plot area
+    NOTS_W    = 90 if has_no_ts else 0   # right-side no-timestamp column
+    LANE_H    = 40
+    TOP_PAD   = 36
+    RIGHT_PAD = 12
     LEGEND_H  = 44
-    n_lanes  = len(lanes)
-    chart_h  = TOP_PAD + n_lanes * LANE_H + LEGEND_H
-    chart_w  = LABEL_W + INNER_W + RIGHT_PAD
+    n_lanes   = len(lanes)
+    lanes_h   = n_lanes * LANE_H
+    chart_h   = TOP_PAD + lanes_h + LEGEND_H
+    chart_w   = LABEL_W + INNER_W + NOTS_W + RIGHT_PAD
 
-    def _cx(ts: datetime) -> float:
-        if not has_time or t_min is None or ts == _min_dt:
-            return LABEL_W + INNER_W / 2
-        secs = (ts - t_min).total_seconds()
+    def _cx_timed(ts: datetime) -> float:
+        secs = (ts - t_min).total_seconds()  # type: ignore[operator]
         return LABEL_W + (secs / span) * INNER_W
 
     parts: list[str] = []
@@ -882,52 +933,83 @@ def _html_swim_lane_chart(timeline: list) -> str:
             f'stroke="#e2e8f0" stroke-width="1"/>'
         )
 
-    # Vertical divider between labels and plot area
+    # Vertical divider: labels | time axis
     parts.append(
         f'<line x1="{LABEL_W}" y1="{TOP_PAD}" x2="{LABEL_W}" '
-        f'y2="{TOP_PAD + n_lanes * LANE_H}" stroke="#cbd5e1" stroke-width="1"/>'
+        f'y2="{TOP_PAD + lanes_h}" stroke="#cbd5e1" stroke-width="1"/>'
     )
 
-    # Time-axis tick marks and grid lines
+    # No-timestamp column: dashed separator + header label
+    if has_no_ts:
+        nots_x = LABEL_W + INNER_W
+        parts.append(
+            f'<line x1="{nots_x}" y1="{TOP_PAD - 6}" x2="{nots_x}" '
+            f'y2="{TOP_PAD + lanes_h}" stroke="#cbd5e1" stroke-width="1" '
+            f'stroke-dasharray="5,3"/>'
+        )
+        parts.append(
+            f'<text x="{nots_x + NOTS_W / 2:.1f}" y="{TOP_PAD - 9}" '
+            f'text-anchor="middle" font-size="10" fill="#94a3b8" '
+            f'font-style="italic">No Timestamp</text>'
+        )
+
+    # Time-axis tick marks and grid lines (time axis only)
     if has_time:
         n_ticks = 6
         for i in range(n_ticks + 1):
-            frac  = i / n_ticks
-            x     = LABEL_W + frac * INNER_W
-            tick_dt = t_min + timedelta(seconds=frac * span)
+            frac    = i / n_ticks
+            x       = LABEL_W + frac * INNER_W
+            tick_dt = t_min + timedelta(seconds=frac * span)  # type: ignore[operator]
             if span > 86400:
-                label = tick_dt.strftime("%m/%d %H:%M")
+                lbl = tick_dt.strftime("%m/%d %H:%M")
             elif span > 3600:
-                label = tick_dt.strftime("%H:%M")
+                lbl = tick_dt.strftime("%H:%M")
             else:
-                label = tick_dt.strftime("%H:%M:%S")
+                lbl = tick_dt.strftime("%H:%M:%S")
             parts.append(
                 f'<line x1="{x:.1f}" y1="{TOP_PAD - 6}" x2="{x:.1f}" '
-                f'y2="{TOP_PAD + n_lanes * LANE_H}" stroke="#e2e8f0" '
+                f'y2="{TOP_PAD + lanes_h}" stroke="#e2e8f0" '
                 f'stroke-width="1" stroke-dasharray="4,3"/>'
             )
             parts.append(
                 f'<text x="{x:.1f}" y="{TOP_PAD - 9}" text-anchor="middle" '
-                f'font-size="10" fill="#94a3b8">{_e(label)}</text>'
+                f'font-size="10" fill="#94a3b8">{_e(lbl)}</text>'
             )
 
-    # Event circles — draw low→high so high-severity sits on top
+    # Draw event circles (low→high so high-severity sits on top)
     _sev_order = {"low": 0, "medium": 1, "high": 2}
     _sev_color = {"high": "#ef4444", "medium": "#f97316", "low": "#6b7280"}
     R = 7
 
-    for ev in sorted(timeline, key=lambda e: _sev_order.get(e["severity"], 0)):
-        lane_idx = seen_lanes.get(ev["collector_title"], 0)
-        cy    = TOP_PAD + lane_idx * LANE_H + LANE_H / 2
-        cx    = _cx(ev["timestamp_sort"])
-        color = _sev_color.get(ev["severity"], "#6b7280")
+    # Per-lane counter for no-timestamp event stagger
+    lane_nots_idx: dict[int, int] = {}
+
+    all_sorted = sorted(timeline, key=lambda e: _sev_order.get(e["severity"], 0))
+    for ev in all_sorted:
+        lane_idx  = seen_lanes.get(ev["collector_title"], 0)
+        cy        = TOP_PAD + lane_idx * LANE_H + LANE_H / 2
+        color     = _sev_color.get(ev["severity"], "#6b7280")
+
+        if ev["timestamp_sort"] != _min_dt and has_time:
+            cx = _cx_timed(ev["timestamp_sort"])
+        else:
+            # Place in the no-timestamp column; stagger horizontally
+            nots_x      = LABEL_W + INNER_W
+            idx         = lane_nots_idx.get(lane_idx, 0)
+            lane_nots_idx[lane_idx] = idx + 1
+            # Spread across NOTS_W with margin; wrap every 4 to a second row
+            col_pos     = idx % 4
+            row_offset  = (idx // 4) * 16 - 8  # row 0: cy-8, row 1: cy+8
+            cx          = nots_x + 14 + col_pos * 18
+            cy          = cy + row_offset
 
         ts_label   = _ts_display(ev["timestamp"])
         user_label = f" · {ev['user']}" if ev["user"] else ""
         flags_txt  = ", ".join(ev["flags"][:3])
         if len(ev["flags"]) > 3:
             flags_txt += f" +{len(ev['flags']) - 3}"
-        tooltip = f"{ts_label}{user_label}\n{ev['summary']}\n{flags_txt}"
+        nots_note  = " (no timestamp)" if ev["timestamp_sort"] == _min_dt else ""
+        tooltip    = f"{ts_label}{nots_note}{user_label}\n{ev['summary']}\n{flags_txt}"
 
         parts.append(
             f'<circle class="sv-event" cx="{cx:.1f}" cy="{cy:.1f}" r="{R}" '
@@ -937,15 +1019,20 @@ def _html_swim_lane_chart(timeline: list) -> str:
         )
 
     # Legend
-    ly = TOP_PAD + n_lanes * LANE_H + 16
+    ly = TOP_PAD + lanes_h + 16
     parts.append(
         f'<text x="{LABEL_W}" y="{ly + 4}" font-size="11" fill="#64748b" font-weight="600">Severity:</text>'
     )
     lx = LABEL_W + 70
-    for sev, color, label in (("high", "#ef4444", "High"), ("medium", "#f97316", "Medium"), ("low", "#6b7280", "Low")):
+    for sev, color, lbl in (("high", "#ef4444", "High"), ("medium", "#f97316", "Medium"), ("low", "#6b7280", "Low")):
         parts.append(f'<circle cx="{lx}" cy="{ly}" r="6" fill="{color}"/>')
-        parts.append(f'<text x="{lx + 10}" y="{ly + 4}" font-size="11" fill="#64748b">{label}</text>')
+        parts.append(f'<text x="{lx + 10}" y="{ly + 4}" font-size="11" fill="#64748b">{lbl}</text>')
         lx += 72
+    if has_no_ts:
+        parts.append(
+            f'<text x="{lx + 10}" y="{ly + 4}" font-size="10" fill="#94a3b8" font-style="italic">'
+            f'Dashed column = no timestamp available</text>'
+        )
 
     parts.append("</svg>")
 

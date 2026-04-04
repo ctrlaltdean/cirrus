@@ -1678,7 +1678,7 @@ def case_list(
 # Triage command  (quick per-user checks, no case folder)
 # ---------------------------------------------------------------------------
 
-DaysTriOpt = Annotated[int, typer.Option("--days", help="How many days back to check (default 7).")]
+DaysTriOpt = Annotated[int, typer.Option("--days", help="How many days back to check (default 14).")]
 
 
 @app.command("triage")
@@ -1687,7 +1687,7 @@ def triage(
     user:       Annotated[Optional[str],       typer.Option("--user",       help="UPN of the suspected compromised account.")] = None,
     users:      Annotated[Optional[list[str]], typer.Option("--users",      help="Multiple UPNs (repeat flag).")] = None,
     users_file: Annotated[Optional[Path],      typer.Option("--users-file", help="File with one UPN per line.")] = None,
-    days:       DaysTriOpt = 7,
+    days:       DaysTriOpt = 14,
     run_workflow: Annotated[bool, typer.Option("--workflow", "-w", help="After triage, run the full BEC+ATO collection workflow into the same case folder.")] = False,
     collect_only: CollectOnlyOpt = False,
     output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
