@@ -66,8 +66,11 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 | **ATO Workflow** | 11-step Account Takeover investigation — authentication layer, persistence, and exfiltration |
 | **BEC+ATO Workflow** | Combined 13-step full attack chain — most BEC incidents begin with an ATO event |
 | **Full Tenant Sweep** | Complete collection across all supported data sources |
-| **Cross-Collector Correlation** | Post-collection engine links events across collectors to surface multi-source attack patterns including hosting-provider sign-ins |
-| **HTML Investigation Report** | Single self-contained HTML report with correlation findings, SVG swim-lane timeline chart, IOC event list, IP enrichment tab, and per-collector tables |
+| **SP Compromise Workflow** | Targeted 7-step collection for OAuth phishing and service principal compromise — covers SP inventory, OAuth grants, SP sign-in logs, app registrations, consent events, and UAL app-token activity |
+| **Mailbox Delegation** | Calendar delegate and shared mailbox enumeration — surfaces attacker-added delegates that survive password resets |
+| **Cross-Collector Correlation** | Post-collection engine links events across collectors to surface multi-source attack patterns including hosting-provider sign-ins; 15 detection rules; tunable with `--sensitivity low/medium/high` |
+| **HTML Investigation Report** | Single self-contained HTML report with correlation findings, SVG swim-lane timeline chart, IOC event list, per-user timeline, IP enrichment tab, and per-collector tables |
+| **Remediation Script** | Auto-generated `remediation_commands.ps1` per case — ready-to-run PowerShell to remove inbox rules, revoke OAuth grants, block accounts, and revoke sessions based on correlation findings |
 | **CIS Compliance Audit** | 34 checks against CIS M365 & Entra ID Benchmarks with wizard UI |
 | **License-Aware Collection** | Detects tenant license tier (P1/P2/E5) and gracefully skips unsupported endpoints |
 | **Multi-Tenant** | Authenticate to and collect from multiple client tenants independently |
@@ -186,7 +189,8 @@ This is expected. CIRRUS authenticates using Microsoft's own pre-registered publ
 | `AuditLog.Read.All` | Sign-in logs, Entra directory audit events |
 | `Directory.Read.All` | Users, groups, devices, app registrations, Conditional Access policies |
 | `Policy.Read.All` | Authorization policies, authentication strength policies |
-| `MailboxSettings.Read` | Mailbox forwarding configuration (SMTP forwarding) |
+| `MailboxSettings.Read` | Mailbox forwarding configuration (SMTP forwarding) and shared mailbox indicators |
+| `Calendars.Read` | Calendar delegate permissions (mailbox delegation — attacker-added calendar access that survives password resets) |
 | `User.Read.All` | User profiles, assigned licenses, identity federation |
 | `IdentityRiskyUser.Read.All` | Entra Identity Protection — user risk state and history |
 | `IdentityRiskEvent.Read.All` | Entra Identity Protection — individual risk detections |
@@ -236,6 +240,7 @@ CIRRUS uses **delegated permissions** — the signed-in account must hold the ro
 | `cirrus run ato` | Global Reader + Security Reader |
 | `cirrus run bec-ato` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
 | `cirrus run full` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
+| `cirrus run sp` | Global Reader + Security Reader |
 | `cirrus run audit` | Global Reader + Security Reader (+ Exchange Administrator for PowerShell checks) |
 
 ¹ Required for inbox rules and mail forwarding checks. Without this role those collectors are skipped — all other collectors continue normally. See [Exchange Recipient Administrator](#exchange-recipient-administrator-inbox-rules--mail-forwarding) below.
@@ -770,25 +775,61 @@ cirrus run full --tenant contoso.com --all-users --days 90 --ual-timeout 10800
 
 ---
 
+#### SP — Service Principal / OAuth App Compromise
+
+Targeted investigation for compromised OAuth applications and service principals. Use when you have evidence of OAuth phishing (user consented to a malicious app), a client secret has leaked from source code or Key Vault, or a service principal is showing anomalous sign-in behaviour.
+
+**Attack patterns covered:**
+- **OAuth phishing** — attacker tricks user into consenting a malicious app that gets persistent Mail.Read / Files.ReadWrite.All access with no further interaction
+- **Client secret extraction** — attacker pulls a secret from source code, a pipeline, or Key Vault and authenticates as the app from attacker-controlled infrastructure
+- **Rogue app registration** — attacker registers a new app in the tenant as a persistent backdoor; may have no owner and long-lived credentials
+
+**What it collects:**
+1. Service principals — full inventory with flags for orphaned / unverified / recently-modified apps
+2. App registrations — recently created apps in the tenant (common attacker persistence)
+3. OAuth grants — what users consented to; flags high-risk scopes and dangerous scope combinations
+4. SP sign-in logs — authentication timeline for the app(s); flags public-IP auth, geo anomalies, auth spikes
+5. Users — account roster for consent attribution
+6. Entra audit logs — app consent events, secret/cert additions, SP modifications
+7. Unified Audit Log — MailItemsAccessed, file downloads, sharing events performed by compromised app tokens
+
+```bash
+# Interactive wizard
+cirrus run sp
+
+# All apps — broad sweep for the collection window
+cirrus run sp --tenant contoso.com --days 30
+
+# Focused on a specific app (by app/client ID)
+cirrus run sp --tenant contoso.com --app-id <app-id> --days 30
+
+# Explicit date range
+cirrus run sp --tenant contoso.com \
+  --start-date 2026-03-01 --end-date 2026-03-18
+```
+
+---
+
 #### Workflow Comparison
 
-| | Triage | BEC | ATO | BEC+ATO | Full |
-|--|:------:|-----|-----|---------|------|
-| Users | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Sign-in logs | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
-| Entra audit logs | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
-| MFA methods | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
-| Risky users / sign-ins | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
-| Conditional Access | | | ✓ | ✓ | ✓ |
-| Registered devices | ✓ ¹ | | ✓ | ✓ | |
-| OAuth grants | ✓ ¹ | ✓ | ✓ | ✓ | ✓ |
-| App registrations | | | ✓ | ✓ | |
-| Mailbox rules | ✓ ¹ | ✓ | | ✓ | ✓ |
-| Mail forwarding | ✓ ¹ | ✓ | | ✓ | ✓ |
-| UAL | | ✓ | ✓ | ✓ | ✓ |
-| Service principals | | | | | ✓ |
-| Case folder / files | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Correlation + HTML report | optional ² | optional | optional | optional | optional |
+| | Triage | BEC | ATO | BEC+ATO | Full | SP |
+|--|:------:|-----|-----|---------|------|-----|
+| Users | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Sign-in logs | ✓ ¹ | ✓ | ✓ | ✓ | ✓ | |
+| Entra audit logs | ✓ ¹ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| MFA methods | ✓ ¹ | ✓ | ✓ | ✓ | ✓ | |
+| Risky users / sign-ins | ✓ ¹ | ✓ | ✓ | ✓ | ✓ | |
+| Conditional Access | | | ✓ | ✓ | ✓ | |
+| Registered devices | ✓ ¹ | | ✓ | ✓ | | |
+| OAuth grants | ✓ ¹ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| App registrations | | | ✓ | ✓ | | ✓ |
+| Mailbox rules | ✓ ¹ | ✓ | | ✓ | ✓ | |
+| Mail forwarding | ✓ ¹ | ✓ | | ✓ | ✓ | |
+| UAL | | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Service principals | | | | | ✓ | ✓ |
+| SP sign-in logs | | | | | | ✓ |
+| Case folder / files | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Correlation + HTML report | optional ² | optional | optional | optional | optional | optional |
 
 ¹ Triage collects a limited snapshot (up to 50 records per check) — sufficient for verdict, not full forensic depth. Use `--workflow` or `cirrus run bec-ato --existing-case` for complete paginated collection.
 ² With `--workflow`, triage runs correlation automatically; without it, run `cirrus analyze <case_dir>` manually.
@@ -826,6 +867,22 @@ It writes:
 - `analysis.xlsx` — all triage and collection CSVs combined into a single Excel workbook
 
 See [Cross-Collector Correlation](#cross-collector-correlation) for the full list of detection rules.
+
+**Tuning rule sensitivity:** By default, correlation rules use thresholds calibrated for medium-size tenants. Use `--sensitivity` to tune:
+
+| Sensitivity | Target environment | Spray threshold | Mass-mail threshold |
+|---|---|---|---|
+| `low` | Large enterprise (reduce noise) | 10 targets, 20 failures | 100 events |
+| `medium` | Default | 5 targets, 10 failures | 50 events |
+| `high` | SMB / small tenant (catch low-volume attacks) | 3 targets, 5 failures | 20 events |
+
+```bash
+# Lower thresholds — catch attacks in small tenants
+cirrus analyze investigations/CONTOSO_20260317_143022 --sensitivity high
+
+# Reduce noise in large tenants
+cirrus run bec-ato --tenant contoso.com --user john@contoso.com --sensitivity low
+```
 
 **Optional enrichment step:** After collection, run `cirrus enrich` to annotate all IPs with geolocation, ASN, and threat intelligence. The enrichment results are folded into the HTML report as a dedicated tab and unlock the `hosting_provider_signin` correlation rule:
 
@@ -1205,12 +1262,16 @@ cirrus analyze investigations/CONTOSO_20260317_143022
 | `privilege_escalation_after_signin` | **HIGH** | Suspicious sign-in activity + high-privilege role assigned to the same user in the same window |
 | `oauth_phishing_pattern` | **HIGH** | Device code / ROPC authentication + high-risk OAuth grant (mail read, file access) for the same user |
 | `bec_attack_pattern` | **HIGH** | Any sign-in activity + inbox rule with forwarding / deletion / hiding or external SMTP forwarding |
+| `dual_exfiltration_channels` | **HIGH** | User has both a mailbox-level exfil mechanism (forwarding rule or SMTP forward) AND a high-risk OAuth grant — belt-and-suspenders exfiltration where removing one channel leaves the other active (T1114.003, T1528, T1020) |
 | `device_code_then_device_registered` | **HIGH** | Device code phishing sign-in + new device registered — attacker obtains a PRT that survives password resets |
 | `password_spray` | **HIGH / MEDIUM** | Single IP with 10+ failures across 5+ accounts. Elevated to HIGH when the same IP also has a successful sign-in |
+| `spray_then_escalation` | **HIGH** | Spray IP with a confirmed successful sign-in, followed within 24 h by a persistence mechanism (new MFA method, device registration, role assignment, or high-risk OAuth grant) for the victim — full T1110 → T1078 → T1098 chain |
 | `mass_mail_access` | **HIGH / MEDIUM** | 50+ MailItemsAccessed UAL events for a single user. Elevated to HIGH when the user also has interactive sign-in activity |
 | `new_account_with_signin` | **MEDIUM** | Recently-created user account with active sign-in events — potential attacker backdoor account |
 | `cross_ip_correlation` | **MEDIUM** | Same public IP in both sign-in logs and directory audit logs — same session performed auth and directory changes |
 | `hosting_provider_signin` | **MEDIUM** | Successful sign-in from an IP identified as a datacenter, hosting provider, proxy, or Tor exit node. Requires `ip_enrichment.json` (run `cirrus enrich` first) |
+| `pim_activation_after_suspicious_signin` | **HIGH** | PIM high-privilege role activation for a user who also had a suspicious sign-in (device code, impossible travel, geo-risk) — attacker activates a dormant privileged role immediately after gaining access |
+| `ca_coverage_gap` | **MEDIUM** | Successful sign-in(s) where no Conditional Access policy was evaluated — user or auth flow falls entirely outside CA enforcement (T1078) |
 
 Three output files are written to the case folder:
 - `ioc_correlation.json` — machine-readable findings (suitable for SIEM ingestion)
@@ -1267,6 +1328,22 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 - [ ] Watch mode (`cirrus watch`) — recurring triage on a watchlist; useful for active retainers
 
 **Completed:**
+- [x] SP compromise workflow (`cirrus run sp`) — 7-step focused workflow for OAuth phishing and service principal compromise investigations; accepts optional `--app-id` to scope SP sign-in logs to a specific app (v0.4.45)
+- [x] `--sensitivity` flag — tune correlation rule thresholds for `low` (large enterprise, less noise), `medium` (default), or `high` (SMB, catch low-volume attacks); applies to password spray, spray-then-escalation, and mass mail access rules (v0.4.46)
+- [x] Consistent IOC flag naming — all collector `_iocFlags` now use `CATEGORY:DETAIL` format; brittle `startswith` prefix checks tightened with trailing colons to prevent false matches (v0.4.47)
+- [x] CA coverage gap rule — correlation rule fires when a user has successful sign-ins outside CA policy enforcement; suppresses noise in tenants with no CA configured (v0.4.44)
+- [x] Mailbox delegation collector — enumerates calendar delegates and shared mailbox markers per user; flags external delegates and high-permission grants that survive password resets (v0.4.44)
+- [x] Spray → escalation chain rule — password spray with a confirmed success, followed within 24 h by a persistence mechanism for the victim (new MFA method, device, role, or OAuth grant); links T1110 → T1078 → T1098 chain (v0.4.44)
+- [x] Calculated impossible travel — great-circle distance between consecutive sign-in IPs; fires when two sign-ins for the same user are geographically impossible given the time between them (v0.4.44)
+- [x] Remediation PS script export — `remediation_commands.ps1` auto-generated per case from correlation findings; includes Remove-InboxRule, Revoke-AzureADOAuth2PermissionGrant, Revoke-AzureADUserAllRefreshToken, and account block commands (v0.4.44)
+- [x] Orphaned service principals — flags SPs with no owner, no recent consent history, and recently-added credentials; common attacker persistence pattern (v0.4.44)
+- [x] OAuth scope combination flags — flags apps with dangerous scope pairs (e.g. Mail.Read + MailboxSettings.ReadWrite is more dangerous than either alone); additional combination patterns for data exfil + persistence (v0.4.44)
+- [x] UAL polling progress indicator — elapsed time shown while waiting for async UAL query; prevents analysts from assuming the tool has hung on slow tenants (v0.4.44)
+- [x] Per-user timeline in HTML report — user dropdown in the HTML report showing all events for that user in chronological order (v0.4.44)
+- [x] Excel cross-sheet hyperlinks — Summary sheet verdict rows link directly to the relevant evidence row in the collector tab; removes manual tab hunting (v0.4.44)
+- [x] SP unusual sign-in flags — SP authenticating from a public IP, anomalous country, or multiple countries across the window; daily volume spike detection; high failure-rate detection (v0.4.44)
+- [x] PIM activation after suspicious sign-in — correlation rule links a high-privilege PIM role activation to a preceding suspicious sign-in for the same user (v0.4.44)
+- [x] Triage severity legend — HIGH / WARN / CLEAN rationale printed in terminal output so helpdesk knows why a verdict was reached without reading raw flag output (v0.4.44)
 - [x] Dual exfiltration channel detection — new correlation rule fires when a user has both a mailbox-level exfil mechanism (forwarding rule / SMTP forward) and a high-risk OAuth grant simultaneously; belt-and-suspenders BEC pattern (T1114.003, T1528, T1020)
 - [x] `--ual-timeout` option — configurable UAL async query timeout (default raised to 2 h); use `--ual-timeout 10800` for very large tenants or long date windows across all four run workflows
 - [x] PowerShell pre-flight check — triage warns before running if PowerShell is not found or the `ExchangeOnlineManagement` module is not installed, so inbox rule and forwarding checks degrade gracefully rather than failing silently
