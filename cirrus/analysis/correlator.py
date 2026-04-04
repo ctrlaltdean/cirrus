@@ -158,6 +158,11 @@ _RULE_TECHNIQUES: dict[str, list[str]] = {
         "T1114.003 — Email Collection: Email Forwarding Rule",
         "T1020 — Automated Exfiltration",
     ],
+    "dual_exfiltration_channels": [
+        "T1114.003 — Email Collection: Email Forwarding Rule",
+        "T1528 — Steal Application Access Token",
+        "T1020 — Automated Exfiltration",
+    ],
     "device_code_then_device_registered": [
         "T1528 — Steal Application Access Token",
         "T1098.005 — Account Manipulation: Device Registration",
@@ -308,6 +313,7 @@ class CorrelationEngine:
             self._rule_privilege_escalation_after_signin,
             self._rule_oauth_phishing_pattern,
             self._rule_bec_attack_pattern,
+            self._rule_dual_exfiltration_channels,
             self._rule_device_code_then_device_registered,
             self._rule_password_spray,
             self._rule_mass_mail_access,
@@ -745,6 +751,101 @@ class CorrelationEngine:
                     "Check UAL for MailItemsAccessed and mail sent events. "
                     "Notify the user and any external parties who may have received fraudulent communications. "
                     "Disable the account and reset credentials if unauthorized access is confirmed."
+                ),
+            ))
+
+        return findings
+
+    def _rule_dual_exfiltration_channels(self) -> list[Finding]:
+        """
+        User has BOTH a mailbox-level exfiltration mechanism (inbox rule
+        forwarding or SMTP forwarding) AND a high-risk OAuth grant.
+
+        Attackers who use belt-and-suspenders exfiltration set up a mail
+        forwarding rule or SMTP redirect to copy mail out in real time,
+        and also consent a malicious OAuth app with Mail.Read or similar
+        scope so they can pull mail independently via the Graph API.
+        This redundancy means removing one mechanism leaves the other active.
+        """
+        rule_records = self._d("mailbox_rules")
+        fwd_records  = self._d("mail_forwarding")
+        oauth_records = self._d("oauth_grants")
+
+        # Users with a forwarding/exfil mailbox rule
+        users_with_rule: dict[str, list[dict]] = defaultdict(list)
+        for r in rule_records:
+            upn = (r.get("_sourceUser") or "").lower()
+            if upn and _has_flag_prefix(r, "FORWARDS_TO:", "PERMANENT_DELETE", "MOVES_TO_HIDDEN_FOLDER:"):
+                users_with_rule[upn].append(r)
+
+        # Users with SMTP forwarding
+        users_with_fwd: dict[str, list[dict]] = defaultdict(list)
+        for r in fwd_records:
+            upn = (r.get("_sourceUser") or "").lower()
+            if upn and _has_flag_prefix(r, "EXTERNAL_SMTP_FORWARD:"):
+                users_with_fwd[upn].append(r)
+
+        # Union of users with any mailbox-level exfil
+        users_with_mailbox_exfil = set(users_with_rule) | set(users_with_fwd)
+        if not users_with_mailbox_exfil:
+            return []
+
+        # Users with a high-risk OAuth grant
+        users_with_oauth: dict[str, list[dict]] = defaultdict(list)
+        for r in oauth_records:
+            upn = (r.get("_sourceUser") or "").lower()
+            if upn and _has_flag_prefix(r, "HIGH_RISK_SCOPE:"):
+                users_with_oauth[upn].append(r)
+
+        findings: list[Finding] = []
+        seen: set[str] = set()
+
+        for upn in users_with_mailbox_exfil & set(users_with_oauth):
+            if upn in seen:
+                continue
+            seen.add(upn)
+
+            rules = users_with_rule.get(upn, [])
+            fwds  = users_with_fwd.get(upn, [])
+            oauths = users_with_oauth[upn]
+
+            rule_flags  = _extract_flags_with_prefix(rules,  "FORWARDS_TO:", "PERMANENT_DELETE", "MOVES_TO_HIDDEN_FOLDER:")
+            fwd_flags   = _extract_flags_with_prefix(fwds,   "EXTERNAL_SMTP_FORWARD:")
+            oauth_flags = _extract_flags_with_prefix(oauths, "HIGH_RISK_SCOPE:")
+            all_flags   = rule_flags + fwd_flags + oauth_flags
+
+            evidence: list[Evidence] = []
+            for r in rules[:2]:
+                evidence.append(_evidence(r, "mailbox_rules", "",
+                    f"Mailbox rule: {', '.join(rule_flags[:2])}"))
+            for r in fwds[:1]:
+                evidence.append(_evidence(r, "mail_forwarding", "",
+                    f"SMTP forwarding: {', '.join(fwd_flags[:1])}"))
+            for r in oauths[:2]:
+                evidence.append(_evidence(r, "oauth_grants", "",
+                    f"OAuth grant: {', '.join(oauth_flags[:2])}"))
+
+            findings.append(Finding(
+                id="",
+                rule="dual_exfiltration_channels",
+                severity="high",
+                title="Dual exfiltration channels — mailbox manipulation and OAuth app access",
+                user=upn,
+                description=(
+                    f"{upn} has both a mailbox-level exfiltration mechanism "
+                    f"({', '.join((rule_flags + fwd_flags)[:2])}) and a high-risk OAuth grant "
+                    f"({', '.join(oauth_flags[:2])}). "
+                    "This belt-and-suspenders pattern indicates a deliberate attacker who "
+                    "established redundant channels: removing one mechanism leaves the other "
+                    "active. Both must be remediated simultaneously."
+                ),
+                evidence=evidence,
+                recommendation=(
+                    "Remove the mailbox rule(s) and disable SMTP forwarding immediately. "
+                    "Revoke the OAuth consent grant(s) from the Entra portal (Enterprise Apps → "
+                    "User consent). Reset the account credentials and revoke all active sessions. "
+                    "Check UAL for MailItemsAccessed events to assess what data was exfiltrated "
+                    "through each channel."
                 ),
             ))
 

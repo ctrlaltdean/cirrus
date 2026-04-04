@@ -170,6 +170,7 @@ LevelOpt = Annotated[Optional[str], typer.Option("--level", "-l", help="CIS leve
 OptionalTenantOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help="Tenant domain or GUID. Prompted if omitted.")]
 CollectOnlyOpt = Annotated[bool, typer.Option("--collect-only", help="Collect evidence only — skip correlation analysis and HTML report. Fastest option when you know exactly what you need.")]
 ExistingCaseOpt = Annotated[Optional[Path], typer.Option("--existing-case", help="Continue collection into an existing case folder instead of creating a new one.")]
+UalTimeoutOpt = Annotated[int, typer.Option("--ual-timeout", help="Maximum seconds to wait for the Unified Audit Log async query to complete (default 7200 = 2 h). Increase for very large tenants or long date ranges.")]
 
 _DATE_FMT = "%Y-%m-%d"
 # Maximum UAL retention periods (informational — shown in the wizard).
@@ -732,6 +733,7 @@ def run_bec(
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
     existing_case: ExistingCaseOpt = None,
+    ual_timeout: UalTimeoutOpt = 7200,
 ) -> None:
     """
     [bold]BEC Investigation Workflow[/bold]
@@ -810,6 +812,7 @@ def run_bec(
         tenant=tenant,
         start_dt=start_dt,
         end_dt=end_dt,
+        extra_params={"ual_timeout": ual_timeout},
         run_analysis=False,
     )
 
@@ -837,6 +840,7 @@ def run_ato(
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
     existing_case: ExistingCaseOpt = None,
+    ual_timeout: UalTimeoutOpt = 7200,
 ) -> None:
     """
     [bold]Account Takeover (ATO) Investigation Workflow[/bold]
@@ -921,6 +925,7 @@ def run_ato(
         tenant=tenant,
         start_dt=start_dt,
         end_dt=end_dt,
+        extra_params={"ual_timeout": ual_timeout},
         run_analysis=False,
     )
 
@@ -948,6 +953,7 @@ def run_bec_ato(
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
     existing_case: ExistingCaseOpt = None,
+    ual_timeout: UalTimeoutOpt = 7200,
 ) -> None:
     """
     [bold]BEC + ATO Combined Investigation Workflow[/bold]
@@ -1030,6 +1036,7 @@ def run_bec_ato(
         tenant=tenant,
         start_dt=start_dt,
         end_dt=end_dt,
+        extra_params={"ual_timeout": ual_timeout},
         run_analysis=False,
     )
 
@@ -1056,6 +1063,7 @@ def run_full(
     all_users: AllUsersOpt = False,
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
+    ual_timeout: UalTimeoutOpt = 7200,
 ) -> None:
     """
     [bold]Full Tenant Collection Workflow[/bold]
@@ -1130,6 +1138,7 @@ def run_full(
         tenant=tenant,
         start_dt=start_dt,
         end_dt=end_dt,
+        extra_params={"ual_timeout": ual_timeout},
         run_analysis=False,
     )
 
@@ -1780,6 +1789,27 @@ def triage(
         "workflow": run_workflow,
     })
 
+    # ── PowerShell pre-flight check ─────────────────────────────────────────
+    try:
+        from cirrus.utils.exchange_ps import check_exa_module_installed, find_powershell
+        _ps = find_powershell()
+        if not _ps:
+            console.print(
+                "[yellow]⚠ PowerShell not found — inbox rule and mail forwarding checks will "
+                "fall back to Graph API only (may miss data if mailbox scope is absent).\n"
+                "  Install PowerShell 7: [bold]https://aka.ms/install-powershell[/bold][/yellow]\n"
+            )
+        else:
+            _exa_ok, _ = check_exa_module_installed(_ps)
+            if not _exa_ok:
+                console.print(
+                    "[yellow]⚠ ExchangeOnlineManagement module not found — mailbox checks will "
+                    "fall back to Graph API only.\n"
+                    "  Run [bold]cirrus deps install[/bold] to install it.[/yellow]\n"
+                )
+    except Exception:
+        pass  # deps utils unavailable; silently skip pre-flight
+
     # ── Run triage checks for each user ────────────────────────────────────
     from cirrus.analysis.triage import run_triage
     from collections import defaultdict as _defaultdict
@@ -1904,6 +1934,28 @@ def triage(
         console.print(f"[bold]Report:[/bold]   [cyan]{report_path}[/cyan]")
     except Exception as exc:
         console.print(f"[dim]HTML report skipped: {exc}[/dim]")
+
+    # ── Domain enrichment prompt ────────────────────────────────────────────
+    # Scan triage flags for external forwarding targets; prompt if found.
+    _fwd_domains: set[str] = set()
+    for _rep in all_reports:
+        for _chk in _rep.checks:
+            for _flag in _chk.flags:
+                if _flag.startswith("FORWARDS_TO:") or _flag.startswith("EXTERNAL_SMTP_FORWARD:"):
+                    _dest = _flag.split(":", 1)[1].strip()
+                    # Extract domain from email address or bare domain
+                    _domain = _dest.split("@")[-1].split("/")[0].strip().lower()
+                    if _domain and "." in _domain:
+                        _fwd_domains.add(_domain)
+    if _fwd_domains:
+        console.print(
+            f"\n[bold yellow]⚡ External forwarding targets found:[/bold yellow] "
+            + ", ".join(sorted(_fwd_domains))
+        )
+        console.print(
+            f"[dim]  Run [bold]cirrus enrich-domains {case.case_dir}[/bold] "
+            f"to check registration age, MX records, and SPF/DMARC.[/dim]"
+        )
 
     # ── Final handoff summary ──────────────────────────────────────────────
     _render_triage_handoff(
@@ -2032,9 +2084,19 @@ def _render_triage_handoff(
         border = "green"
         verdict_str = "[bold green]CLEAN[/bold green]"
 
+    # Verdict-conditional immediate action line
+    if overall == "high":
+        action_line = "[bold red]⚡ Action:[/bold red] Lock the account NOW and escalate immediately to your cyber security team."
+    elif overall == "warn":
+        action_line = "[bold yellow]⚠ Action:[/bold yellow] Escalate to your cyber security team for further investigation."
+    else:
+        action_line = "[bold green]✓ Action:[/bold green] No indicators found. Monitor the account and re-triage if new information emerges."
+
     lines: list[str] = [
         f"[bold]Overall verdict:[/bold] {verdict_str}",
         f"[bold]Case folder:[/bold]     [cyan]{case_dir}[/cyan]",
+        "",
+        action_line,
         "",
     ]
 

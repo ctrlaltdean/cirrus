@@ -50,7 +50,7 @@ from cirrus.collectors.risky_users import RiskySignInsCollector, RiskyUsersColle
 from cirrus.collectors.pim_activations import PIMActivationsCollector
 from cirrus.collectors.signin_logs import SignInLogsCollector
 from cirrus.collectors.sp_signin_logs import SPSignInLogsCollector
-from cirrus.collectors.unified_audit import UnifiedAuditCollector
+from cirrus.collectors.unified_audit import POLL_TIMEOUT, UnifiedAuditCollector
 from cirrus.collectors.users import UsersCollector
 from cirrus.workflows.base import BaseWorkflow
 
@@ -129,7 +129,8 @@ class ATOWorkflow(BaseWorkflow):
             ),
             (
                 UnifiedAuditCollector,
-                {"users": users, "start_dt": start_dt, "end_dt": end_dt},
+                {"users": users, "start_dt": start_dt, "end_dt": end_dt,
+                 "poll_timeout": kwargs.get("ual_timeout", POLL_TIMEOUT)},
                 "Unified Audit Log (UAL)",
             ),
         ]

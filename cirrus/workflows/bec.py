@@ -31,7 +31,7 @@ from cirrus.collectors.mfa_methods import MFAMethodsCollector
 from cirrus.collectors.oauth_grants import OAuthGrantsCollector
 from cirrus.collectors.risky_users import RiskySignInsCollector, RiskyUsersCollector
 from cirrus.collectors.signin_logs import SignInLogsCollector
-from cirrus.collectors.unified_audit import UnifiedAuditCollector
+from cirrus.collectors.unified_audit import POLL_TIMEOUT, UnifiedAuditCollector
 from cirrus.collectors.users import UsersCollector
 from cirrus.workflows.base import BaseWorkflow
 
@@ -99,6 +99,7 @@ class BECWorkflow(BaseWorkflow):
                     "start_dt": start_dt,
                     "end_dt": end_dt,
                     "users": users,
+                    "poll_timeout": kwargs.get("ual_timeout", POLL_TIMEOUT),
                 },
                 "Unified Audit Log (UAL)",
             ),

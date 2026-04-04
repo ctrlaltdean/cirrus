@@ -367,8 +367,8 @@ Each check writes a `.csv` to `triage/` and `.json` / `.ndjson` to `triage/json/
 # Single user — creates case folder with triage evidence package
 cirrus triage --tenant contoso.com --user john@contoso.com
 
-# Wider window
-cirrus triage --tenant contoso.com --user john@contoso.com --days 14
+# Wider window (default lookback is 14 days)
+cirrus triage --tenant contoso.com --user john@contoso.com --days 30
 
 # Triage + full BEC+ATO collection in one command (complete handoff package)
 cirrus triage --tenant contoso.com --user john@contoso.com --workflow
@@ -440,10 +440,16 @@ With `--workflow`, the full BEC+ATO collector outputs are added to a `collection
 │  Overall verdict: HIGH RISK                                                │
 │  Case folder:     investigations/CONTOSO_20260317_143022                   │
 │                                                                            │
+│  ⚡ Action: Lock the account NOW and escalate immediately to your          │
+│             cyber security team.                                           │
+│                                                                            │
 │  To add full BEC+ATO collection, the cyber team can run:                   │
 │    cirrus run bec-ato --tenant contoso.com \                               │
 │      --existing-case investigations/CONTOSO_20260317_143022                │
 ╰────────────────────────────────────────────────────────────────────────────╯
+
+⚡ External forwarding targets found: gmail.com
+   Run cirrus enrich-domains investigations/CONTOSO_20260317_143022 to check reputation and registration age
 ```
 
 ---
@@ -683,6 +689,9 @@ cirrus run bec --tenant contoso.com --all-users --start-date 2026-03-01 --end-da
 # Custom case name and output directory
 cirrus run bec --tenant contoso.com --user john@contoso.com \
   --case-name INC-2026-042 --output-dir D:\Cases
+
+# Large tenant / long date range — increase UAL async query timeout (default 2 h)
+cirrus run bec --tenant contoso.com --user john@contoso.com --days 90 --ual-timeout 10800
 ```
 
 ---
@@ -752,6 +761,9 @@ cirrus run full --tenant contoso.com --all-users --days 90
 
 # Targeted to specific users, all artifact types
 cirrus run full --tenant contoso.com --users-file vip_users.txt
+
+# Very large tenant — extend UAL timeout to 3 h
+cirrus run full --tenant contoso.com --all-users --days 90 --ual-timeout 10800
 ```
 
 > **Note:** Full tenant sweeps on large tenants (1000+ users) can take 15–30 minutes and generate large output files. Use triage or a targeted workflow first if a compromised account is known.
@@ -1245,19 +1257,24 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 ## Roadmap
 
 **In progress / next up:**
-- [ ] Service principal sign-in logs collector — closes the blind spot where attackers pivot to OAuth app tokens after initial compromise; separate Graph endpoint from user sign-ins
 - [ ] Tenant-wide OAuth app inventory — which apps have been granted consent across the tenant in the last N days; identifies rogue app phishing campaigns
-- [ ] MITRE ATT&CK mapping — attach technique IDs (T1078, T1528, T1110.003, etc.) to correlation findings for SIEM integration and reporting
-- [ ] Remediation checklist — dedicated report section mapping each finding to a prioritised, checkbox-style action list
-
-**Planned:**
 - [ ] Executive summary / management report — non-technical 1-page summary for client handoff
 - [ ] Case notes (`cirrus case note`) — analyst annotations that persist into the HTML report
 - [ ] App registration / service principal auth (`--client-id` / `--client-secret`) for unattended/automated collection
+
+**Planned:**
 - [ ] SIEM push integrations (Splunk HEC, Microsoft Sentinel)
 - [ ] Watch mode (`cirrus watch`) — recurring triage on a watchlist; useful for active retainers
 
 **Completed:**
+- [x] Dual exfiltration channel detection — new correlation rule fires when a user has both a mailbox-level exfil mechanism (forwarding rule / SMTP forward) and a high-risk OAuth grant simultaneously; belt-and-suspenders BEC pattern (T1114.003, T1528, T1020)
+- [x] `--ual-timeout` option — configurable UAL async query timeout (default raised to 2 h); use `--ual-timeout 10800` for very large tenants or long date windows across all four run workflows
+- [x] PowerShell pre-flight check — triage warns before running if PowerShell is not found or the `ExchangeOnlineManagement` module is not installed, so inbox rule and forwarding checks degrade gracefully rather than failing silently
+- [x] Verdict-conditional action line in triage handoff — HIGH verdict prompts immediate account lock, WARN prompts escalation, CLEAN prompts continued monitoring
+- [x] Domain enrichment auto-prompt — triage automatically detects external forwarding destinations and prints the `cirrus enrich-domains` command so analysts know to follow up without reading the raw flags
+- [x] Excel Summary sheet — `analysis.xlsx` opens to a colour-coded Summary page (overall verdict, per-user verdict table, check detail) generated from `triage_report.json`; no more hunting across tabs for the verdict
+- [x] HTML report tab coverage — `risky_users`, `service_principals`, and `conditional_access_policies` collectors were missing from the HTML report tab list; all three are now rendered
+- [x] Swim-lane chart no-timestamp fix — events from mailbox rules, mail forwarding, and OAuth grants (no inherent timestamp) previously clustered at the chart midpoint; now rendered in a dedicated "No Timestamp" column on the right with per-lane stagger
 - [x] PIM role activation history — Privileged Identity Management activation logs with IOC flags for high-priv activations, missing justification, unusual hours, and self-activation (T1548)
 - [x] Evidence packaging (`cirrus case package`) — zip with SHA-256 chain-of-custody manifest for legal handoff
 - [x] Domain enrichment (`cirrus enrich-domains`) — RDAP registration age and MX/SPF/DMARC lookups on forwarding destinations and external email addresses
@@ -1267,7 +1284,7 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 - [x] Stale account enumeration — `cirrus hunt` flags enabled/licensed users with no sign-in in 90+ days (prime low-noise ATO targets)
 - [x] IP enrichment (`cirrus enrich`) — geo/ASN/hosting/proxy/Tor via ip-api.com + optional AbuseIPDB abuse scoring
 - [x] Blast radius assessment (`cirrus blast-radius`) — 6 parallel Graph API checks mapping account access footprint
-- [x] Additional correlation rules: password spray, mass mail access, hosting-provider sign-in (11 rules total)
+- [x] Additional correlation rules: password spray, mass mail access, hosting-provider sign-in (12 rules total)
 - [x] Triage handoff package — `cirrus triage` now creates a case folder with SIEM-ready NDJSON per check, `triage_report.json` (structured verdict + flags), and chain-of-custody audit log; `--workflow` adds full BEC+ATO collection in the same pass; `cirrus run bec/ato/bec-ato` accept `--existing-case` to extend a triage case
 - [x] Quick triage command (`cirrus triage`) — 8 parallel checks, results in seconds
 - [x] HTML investigation report (`investigation_report.html`) — self-contained, print-friendly, offline-capable; generated after both triage and workflow runs; includes SVG swim-lane timeline chart, IP enrichment tab, domain enrichment tab, remediation checklist
