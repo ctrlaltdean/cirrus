@@ -120,7 +120,7 @@ def _detect_auth_failures(records: list[dict]) -> None:
     """
     failure_counts: dict[str, int] = {}
     for record in records:
-        if any(f.startswith("FAILED_SP_AUTH") for f in record.get("_iocFlags", [])):
+        if any(f.startswith("FAILED_SP_AUTH:") for f in record.get("_iocFlags", [])):
             app_id = record.get("appId") or record.get("servicePrincipalId") or "unknown"
             failure_counts[app_id] = failure_counts.get(app_id, 0) + 1
 

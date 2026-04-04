@@ -433,7 +433,7 @@ class CorrelationEngine:
         by_user_mfa: dict[str, list[dict]] = defaultdict(list)
         for r in mfa_records:
             upn = (r.get("_sourceUser") or "").lower()
-            if upn and _has_flag_prefix(r, "RECENTLY_ADDED", "HIGH_PERSISTENCE_METHOD"):
+            if upn and _has_flag_prefix(r, "RECENTLY_ADDED:", "HIGH_PERSISTENCE_METHOD:"):
                 by_user_mfa[upn].append(r)
 
         # Index: user -> recently-registered devices
@@ -1355,7 +1355,7 @@ class CorrelationEngine:
                 None,
             )
             created_flag = next(
-                (f for f in _flags(user_rec) if f.startswith("RECENTLY_CREATED")),
+                (f for f in _flags(user_rec) if f.startswith("RECENTLY_CREATED:")),
                 "RECENTLY_CREATED",
             ) if user_rec else "RECENTLY_CREATED"
 
