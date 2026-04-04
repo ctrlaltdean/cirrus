@@ -33,6 +33,7 @@ Why this matters:
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
@@ -132,6 +133,56 @@ def _detect_auth_failures(records: list[dict]) -> None:
             record["_iocFlags"].append(f"HIGH_FAILURE_RATE:{count}_failures")
 
 
+def _detect_sp_anomalies(records: list[dict]) -> None:
+    """
+    Cross-record anomaly detection for service principal sign-ins.
+
+    1. Multi-country authentication — an SP authenticating from 3+ distinct
+       countries is unusual for normal cloud infrastructure (which tends to
+       egress from fixed regions). Flags SP_MULTI_COUNTRY_AUTH.
+
+    2. Authentication volume spike — if a single SP has a day with >5× the
+       average daily auth count across the window, flag SP_AUTH_SPIKE. This
+       surfaces compromised service principals being used for bulk operations.
+    """
+    # Group by app ID
+    by_app: dict[str, list[dict]] = defaultdict(list)
+    for r in records:
+        app_id = r.get("appId") or r.get("servicePrincipalId") or "unknown"
+        by_app[app_id].append(r)
+
+    for app_id, app_records in by_app.items():
+        # --- Multi-country detection ---
+        countries: set[str] = set()
+        for r in app_records:
+            c = (r.get("location") or {}).get("countryOrRegion") or ""
+            if c:
+                countries.add(c)
+        if len(countries) >= 3:
+            country_list = ", ".join(sorted(countries))
+            flag = f"SP_MULTI_COUNTRY_AUTH:{len(countries)}_countries:{country_list}"
+            for r in app_records:
+                r["_iocFlags"].append(flag)
+
+        # --- Daily volume spike detection ---
+        day_counts: dict[str, int] = defaultdict(int)
+        for r in app_records:
+            ts = r.get("createdDateTime") or ""
+            day = ts[:10]  # YYYY-MM-DD
+            if day:
+                day_counts[day] += 1
+
+        if len(day_counts) >= 2:
+            avg_per_day = len(app_records) / len(day_counts)
+            spike_threshold = max(avg_per_day * 5, 50)  # 5× average, minimum 50
+            for day, count in day_counts.items():
+                if count >= spike_threshold:
+                    spike_flag = f"SP_AUTH_SPIKE:{count}_auths_on_{day}_(avg_{avg_per_day:.0f})"
+                    for r in app_records:
+                        if (r.get("createdDateTime") or "").startswith(day):
+                            r["_iocFlags"].append(spike_flag)
+
+
 class SPSignInLogsCollector(GraphCollector):
     """
     Collect service principal / managed identity sign-in logs from Entra ID.
@@ -192,5 +243,8 @@ class SPSignInLogsCollector(GraphCollector):
 
         # Cross-record: high failure rate detection
         _detect_auth_failures(records)
+
+        # Cross-record: multi-country auth and daily volume spike detection
+        _detect_sp_anomalies(records)
 
         return records

@@ -144,6 +144,19 @@ _COLLECTOR_CONFIG: dict[str, dict] = {
             ("Deliver+Forward", "deliverToMailboxAndForward"),
         ],
     },
+    "mailbox_delegation": {
+        "title": "Mailbox Delegation",
+        "filename": "mailbox_delegation.json",
+        "timestamp_key": "",
+        "user_key": "_sourceUser",
+        "columns": [
+            ("Mailbox User",    "_sourceUser"),
+            ("Delegate",        "delegateEmail"),
+            ("Delegate Name",   "delegateName"),
+            ("Permission Role", "role"),
+            ("External?",       "isExternal"),
+        ],
+    },
     "pim_activations": {
         "title": "PIM Activations",
         "filename": "pim_activations.json",
@@ -646,6 +659,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 .collector-name { font-size: 11px; color: var(--muted); display: inline-block;
                   min-width: 140px; }
 
+/* Per-user timeline pills */
+.ut-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+.ut-pill { padding: 5px 12px; border-radius: 20px; border: 1px solid var(--border);
+           background: #f8fafc; font-size: 12px; font-family: monospace; cursor: pointer;
+           color: var(--navy); transition: background 0.15s; }
+.ut-pill:hover { background: #e2e8f0; }
+.ut-pill.active { background: var(--navy); color: #fff; border-color: var(--navy); }
+.ut-pill-count { display: inline-block; background: #ffffff40; border-radius: 10px;
+                 padding: 0 5px; margin-left: 4px; font-size: 11px; }
+.ut-pill.active .ut-pill-count { background: #ffffff30; }
+
 /* Swim-lane chart event circles */
 .sv-event { transition: opacity 0.15s; opacity: 0.85; }
 .sv-event:hover { opacity: 1 !important; }
@@ -679,6 +703,14 @@ function toggleFinding(id) {
   const icon = document.getElementById('fi-' + id);
   const open = body.classList.toggle('open');
   icon.textContent = open ? '▲' : '▼';
+}
+function showUserTimeline(safeId) {
+  document.querySelectorAll('.ut-section').forEach(s => s.style.display = 'none');
+  document.querySelectorAll('.ut-pill').forEach(p => p.classList.remove('active'));
+  const section = document.getElementById('ut_' + safeId);
+  if (section) section.style.display = 'block';
+  const pill = document.querySelector('.ut-pill[data-uid="' + safeId + '"]');
+  if (pill) pill.classList.add('active');
 }
 </script>"""
 
@@ -748,9 +780,10 @@ def _collector_stat_cards(stats: dict) -> str:
 
 def _html_tab_nav(data: dict, corr: dict, timeline: list, enrichment: dict | None = None, domain_enrichment: dict | None = None) -> str:
     findings = corr.get("findings") or []
-    tabs = [("correlation", f"Correlation ({len(findings)})"),
-            ("timeline",    f"Timeline ({len(timeline)})"),
-            ("users",       "Users")]
+    tabs = [("correlation",   f"Correlation ({len(findings)})"),
+            ("timeline",     f"Timeline ({len(timeline)})"),
+            ("users",        "Users"),
+            ("user_timeline","User Timeline")]
     if findings:
         high_n = sum(1 for f in findings if f.get("severity") == "high")
         rem_label = f"Remediation ({len(findings)}"
@@ -1522,6 +1555,94 @@ def _html_enrichment_tab(enrichment: dict) -> str:
     )
 
 
+def _upn_to_safe_id(upn: str) -> str:
+    """Sanitise a UPN to a string safe for use as an HTML element id."""
+    return "".join(c if c.isalnum() else "_" for c in upn.lower())
+
+
+def _html_user_timeline_tab(timeline: list) -> str:
+    """
+    Per-user timeline tab — groups all flagged events by user and renders a
+    selector that lets analysts jump to any account's chronological event list.
+    Only users with at least one attributed event are shown.
+    """
+    _min_dt = datetime.min.replace(tzinfo=timezone.utc)
+
+    # Group events by user; skip events with no user attribution
+    by_user: dict[str, list[dict]] = {}
+    for ev in timeline:
+        user = (ev.get("user") or "").lower().strip()
+        if not user:
+            continue
+        if user not in by_user:
+            by_user[user] = []
+        by_user[user].append(ev)
+
+    # Sort users by total event count descending
+    sorted_users = sorted(by_user.items(), key=lambda x: -len(x[1]))
+
+    if not sorted_users:
+        return (
+            '<div class="tab-content" id="user_timeline">'
+            '<div class="section-title">Per-User Timeline</div>'
+            '<p class="no-data">No user-attributed flagged events found.</p>'
+            '</div>'
+        )
+
+    # Build user selector pills
+    pills: list[str] = []
+    for i, (upn, evs) in enumerate(sorted_users):
+        safe_id = _upn_to_safe_id(upn)
+        active_cls = "active" if i == 0 else ""
+        pills.append(
+            f'<button class="ut-pill {active_cls}" data-uid="{_e(safe_id)}" '
+            f'onclick="showUserTimeline(\'{_e(safe_id)}\')">'
+            f'{_e(upn)} <span class="ut-pill-count">{len(evs)}</span></button>'
+        )
+
+    # Build per-user event tables
+    sections: list[str] = []
+    for i, (upn, evs) in enumerate(sorted_users):
+        safe_id = _upn_to_safe_id(upn)
+        display = "block" if i == 0 else "none"
+
+        rows: list[str] = []
+        for ev in evs:
+            ts = _ts_display(ev.get("timestamp") or "")
+            sev = ev.get("severity") or "low"
+            sev_color = _SEV_COLOR.get(sev, "#6b7280")
+            collector = _e(ev.get("collector_title") or ev.get("collector") or "")
+            summary = _e(ev.get("summary") or "")
+            flags_html = " ".join(_flag_badge(f) for f in (ev.get("flags") or [])[:5])
+            rows.append(
+                f'<tr style="border-left:3px solid {sev_color}">'
+                f'<td style="white-space:nowrap;color:#6b7280">{_e(ts)}</td>'
+                f'<td style="white-space:nowrap">{collector}</td>'
+                f'<td>{summary}</td>'
+                f'<td class="flags-cell">{flags_html}</td>'
+                f'</tr>'
+            )
+
+        sections.append(
+            f'<div class="ut-section" id="ut_{_e(safe_id)}" style="display:{display}">'
+            f'<table class="data-table">'
+            f'<thead><tr><th>Timestamp</th><th>Collector</th><th>Event</th><th>Flags</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody>'
+            f'</table>'
+            f'</div>'
+        )
+
+    return (
+        '<div class="tab-content" id="user_timeline">'
+        '<div class="section-title">Per-User Timeline</div>'
+        '<p style="margin:0 0 12px;color:#6b7280;font-size:13px">'
+        'Select a user to see all their flagged events in chronological order across all collectors.</p>'
+        f'<div class="ut-pills">{"".join(pills)}</div>'
+        f'<div class="ut-tables">{"".join(sections)}</div>'
+        '</div>'
+    )
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def generate_report(case_dir: Path) -> Path:
@@ -1545,6 +1666,7 @@ def generate_report(case_dir: Path) -> Path:
         _html_correlation_tab(corr),
         _html_timeline_tab(timeline),
         _html_users_tab(user_summary),
+        _html_user_timeline_tab(timeline),
     ]
     if corr.get("findings"):
         tab_contents.append(_html_remediation_tab(corr))

@@ -26,6 +26,7 @@ from datetime import datetime
 
 from cirrus.collectors.audit_logs import AuditLogsCollector
 from cirrus.collectors.mail_forwarding import MailForwardingCollector
+from cirrus.collectors.mailbox_delegation import MailboxDelegationCollector
 from cirrus.collectors.mailbox_rules import MailboxRulesCollector
 from cirrus.collectors.mfa_methods import MFAMethodsCollector
 from cirrus.collectors.oauth_grants import OAuthGrantsCollector
@@ -87,6 +88,11 @@ class BECWorkflow(BaseWorkflow):
                 MailForwardingCollector,
                 {"users": users},
                 "Mailbox forwarding settings",
+            ),
+            (
+                MailboxDelegationCollector,
+                {"users": users},
+                "Mailbox calendar delegation",
             ),
             (
                 OAuthGrantsCollector,

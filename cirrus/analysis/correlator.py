@@ -170,6 +170,12 @@ _RULE_TECHNIQUES: dict[str, list[str]] = {
     "password_spray": [
         "T1110.003 — Brute Force: Password Spraying",
     ],
+    "spray_then_escalation": [
+        "T1110.003 — Brute Force: Password Spraying",
+        "T1078 — Valid Accounts",
+        "T1098.003 — Account Manipulation: Additional Cloud Roles",
+        "T1098.005 — Account Manipulation: Device Registration",
+    ],
     "mass_mail_access": [
         "T1114.002 — Email Collection: Remote Email Collection",
     ],
@@ -316,6 +322,7 @@ class CorrelationEngine:
             self._rule_dual_exfiltration_channels,
             self._rule_device_code_then_device_registered,
             self._rule_password_spray,
+            self._rule_spray_then_escalation,
             self._rule_mass_mail_access,
             self._rule_new_account_with_signin,
             self._rule_cross_ip_correlation,
@@ -362,6 +369,9 @@ class CorrelationEngine:
 
         txt_path = self.case_dir / "ioc_correlation.txt"
         _write_text_report(report, findings, txt_path)
+
+        ps_path = self.case_dir / "remediation_commands.ps1"
+        _write_remediation_script(findings, ps_path)
 
         return report
 
@@ -1022,6 +1032,162 @@ class CorrelationEngine:
 
         return findings
 
+    def _rule_spray_then_escalation(self) -> list[Finding]:
+        """
+        A password spray attack that succeeded (same IP has successful sign-in)
+        against a user who THEN had a persistence mechanism added within 24 hours:
+        a new MFA method, a new device registered, a high-privilege role assigned,
+        or a new OAuth grant with high-risk scopes.
+
+        This links the spray as the initial access vector to post-compromise
+        consolidation activity — the full T1110 → T1078 → T1098 chain.
+        """
+        signin_records = self._d("signin_logs")
+        audit_records  = self._d("audit_logs")
+        mfa_records    = self._d("mfa_methods")
+        device_records = self._d("registered_devices")
+        oauth_records  = self._d("oauth_grants")
+        if not signin_records:
+            return []
+
+        # Identify spray IPs (same criteria as _rule_password_spray)
+        ip_failures: dict[str, set[str]] = defaultdict(set)
+        for r in signin_records:
+            status = r.get("status") or {}
+            if (status.get("errorCode") or 0) != 0:
+                ip = r.get("ipAddress") or ""
+                upn = (r.get("userPrincipalName") or "").lower()
+                if ip and upn:
+                    ip_failures[ip].add(upn)
+
+        spray_ips = {
+            ip for ip, targets in ip_failures.items()
+            if len(targets) >= _SPRAY_MIN_TARGETS
+        }
+        if not spray_ips:
+            return []
+
+        # Find users who had a successful sign-in from any spray IP
+        spray_successes: dict[str, dict] = {}   # upn → first success record
+        for r in signin_records:
+            if r.get("ipAddress") not in spray_ips:
+                continue
+            if (r.get("status") or {}).get("errorCode", -1) != 0:
+                continue
+            upn = (r.get("userPrincipalName") or "").lower()
+            if upn and upn not in spray_successes:
+                spray_successes[upn] = r
+
+        if not spray_successes:
+            return []
+
+        _ESCALATION_WINDOW = 86400  # 24 h in seconds
+        _PERSISTENCE_AUDIT_PREFIXES = (
+            "RECENTLY_ADDED",
+            "HIGH_PRIV_ROLE_ASSIGNED",
+        )
+
+        findings: list[Finding] = []
+
+        for upn, success_rec in spray_successes.items():
+            success_dt = _parse_dt(success_rec.get("createdDateTime") or "")
+            if success_dt == datetime.min.replace(tzinfo=timezone.utc):
+                continue
+
+            escalation_evidence: list[Evidence] = []
+
+            # Audit log — MFA add, role assignment, device join within 24 h
+            for r in audit_records:
+                target = (r.get("_targetUser") or "").lower()
+                if target != upn:
+                    continue
+                if not _has_flag_prefix(r, *_PERSISTENCE_AUDIT_PREFIXES):
+                    continue
+                ev_dt = _parse_dt(r.get("activityDateTime") or "")
+                if ev_dt == datetime.min.replace(tzinfo=timezone.utc):
+                    continue
+                delta = (ev_dt - success_dt).total_seconds()
+                if 0 <= delta <= _ESCALATION_WINDOW:
+                    escalation_evidence.append(_evidence(
+                        r, "audit_logs", "activityDateTime",
+                        f"Post-spray persistence: {r.get('activityDisplayName', 'audit event')}"
+                    ))
+
+            # MFA methods — recently added entries
+            for r in mfa_records:
+                if (r.get("userPrincipalName") or "").lower() != upn:
+                    continue
+                if not _has_flag_prefix(r, "RECENTLY_ADDED"):
+                    continue
+                escalation_evidence.append(_evidence(
+                    r, "mfa_methods", "createdDateTime",
+                    f"Recently added MFA method: {r.get('methodType', 'unknown')}"
+                ))
+
+            # Registered devices — added within 24 h of spray success
+            for r in device_records:
+                if (r.get("_sourceUser") or "").lower() != upn:
+                    continue
+                reg_dt = _parse_dt(
+                    r.get("registrationDateTime") or r.get("createdDateTime") or ""
+                )
+                if reg_dt == datetime.min.replace(tzinfo=timezone.utc):
+                    continue
+                delta = (reg_dt - success_dt).total_seconds()
+                if 0 <= delta <= _ESCALATION_WINDOW:
+                    escalation_evidence.append(_evidence(
+                        r, "registered_devices", "registrationDateTime",
+                        f"Device registered {int(delta / 3600)}h after spray success: "
+                        f"{r.get('displayName', 'unknown')}"
+                    ))
+
+            # OAuth grants — high-risk scopes on this user
+            for r in oauth_records:
+                if (r.get("_sourceUser") or "").lower() != upn:
+                    continue
+                if _has_flag_prefix(r, "HIGH_RISK_SCOPE"):
+                    escalation_evidence.append(_evidence(
+                        r, "oauth_grants", "",
+                        f"High-risk OAuth grant: {(r.get('scope') or '')[:80]}"
+                    ))
+
+            if not escalation_evidence:
+                continue
+
+            spray_ip_list = ", ".join(list(spray_ips)[:4])
+            findings.append(Finding(
+                id="",
+                rule="spray_then_escalation",
+                severity="high",
+                title=f"Password spray → post-compromise escalation — {upn}",
+                user=upn,
+                description=(
+                    f"A password spray from IP(s) {spray_ip_list} succeeded against {upn}. "
+                    f"Within 24 hours of the successful sign-in, "
+                    f"{len(escalation_evidence)} persistence/escalation event(s) were observed "
+                    "on that account: new MFA methods, device registrations, role assignments, "
+                    "or high-risk OAuth grants. This pattern is consistent with an attacker "
+                    "consolidating access immediately after spray-based initial compromise."
+                ),
+                evidence=[
+                    _evidence(
+                        success_rec, "signin_logs", "createdDateTime",
+                        f"Spray success — {upn} authenticated from spray IP"
+                    ),
+                    *escalation_evidence[:8],
+                ],
+                recommendation=(
+                    f"Treat {upn} as compromised. "
+                    "Revoke all active sessions, reset credentials, and review/remove any "
+                    "MFA methods, devices, roles, or OAuth grants added after the spray "
+                    "success timestamp. "
+                    "Enrich the spray source IP(s) via cirrus enrich to assess infrastructure. "
+                    "Check whether other accounts targeted by the spray also show post-access activity."
+                ),
+            ))
+
+        return findings
+
     def _rule_mass_mail_access(self) -> list[Finding]:
         """
         A user with 50+ MailItemsAccessed UAL events in the collection window.
@@ -1515,10 +1681,19 @@ class CorrelationEngine:
         CA enforcement boundary — either because no policies target them, they are
         excluded from all policies, or they use a legacy auth client that CA cannot
         evaluate. Attackers deliberately target accounts or flows that fall outside CA.
+
+        Noise reduction: if the tenant has no CA policies at all, only fire for users
+        who also have suspicious sign-in flags (impossible travel, risky auth protocol,
+        geo-risk, etc.). Tenants with no CA are common on P1-free plans — flagging
+        every clean sign-in would flood the report with low-value noise.
         """
         signin_records = self._d("signin_logs")
         if not signin_records:
             return []
+
+        # Determine whether the tenant has any CA policies configured
+        ca_policies = self._d("conditional_access_policies")
+        tenant_has_ca = bool(ca_policies)
 
         by_user: dict[str, list[dict]] = defaultdict(list)
         for r in signin_records:
@@ -1546,6 +1721,17 @@ class CorrelationEngine:
             if len(no_ca_records) < 2:
                 continue
 
+            # If the tenant has no CA policies at all, only fire when the user also
+            # has suspicious sign-in flags — otherwise every clean user in a no-CA
+            # tenant generates a finding, which drowns out real signals.
+            if not tenant_has_ca:
+                has_suspicious = any(
+                    _has_flag_prefix(r, *_SUSPICIOUS_SIGNIN_PREFIXES)
+                    for r in no_ca_records
+                )
+                if not has_suspicious:
+                    continue
+
             apps: list[str] = list({
                 r.get("clientAppUsed") or r.get("appDisplayName") or "unknown"
                 for r in no_ca_records
@@ -1564,6 +1750,35 @@ class CorrelationEngine:
                     f"CA-gap sign-in via {app}" + (f" from {country}" if country else ""),
                 ))
 
+            if tenant_has_ca:
+                context_note = (
+                    "The tenant has Conditional Access policies configured, but none "
+                    "were evaluated for these sessions — this user may be explicitly "
+                    "excluded from all policies, or is using a legacy auth client that "
+                    "CA cannot intercept."
+                )
+                recommendation = (
+                    f"Review whether {upn} is intentionally excluded from CA policies. "
+                    "Check Entra ID > Security > Conditional Access > Sign-in logs to "
+                    "identify which policies should have applied. "
+                    "Ensure no 'break-glass' exclusions are being abused. "
+                    "If using legacy auth clients, block legacy auth via CA "
+                    "(policy: block when clientAppTypes includes exchangeActiveSync/other)."
+                )
+            else:
+                context_note = (
+                    "The tenant has no Conditional Access policies — all sign-ins bypass "
+                    "MFA enforcement and device compliance checks by default. "
+                    "This user also has suspicious sign-in flags, making the lack of CA "
+                    "a material risk rather than a routine configuration gap."
+                )
+                recommendation = (
+                    "Deploy Conditional Access policies as a matter of priority. "
+                    "At minimum: require MFA for all users, block legacy authentication, "
+                    "and restrict sign-ins to compliant or hybrid-joined devices. "
+                    f"Investigate the suspicious sign-in flags for {upn} immediately."
+                )
+
             findings.append(Finding(
                 id="",
                 rule="ca_coverage_gap",
@@ -1575,18 +1790,10 @@ class CorrelationEngine:
                     "Conditional Access policy was evaluated. "
                     f"Applications used: {', '.join(apps)}. "
                     f"Countries: {', '.join(countries)}. "
-                    "This means the account bypassed MFA, device compliance, and location "
-                    "restrictions for these sessions — intentionally or due to a policy gap."
+                    f"{context_note}"
                 ),
                 evidence=evidence,
-                recommendation=(
-                    f"Review whether {upn} is intentionally excluded from CA policies. "
-                    "Check Entra ID > Security > Conditional Access > Sign-in logs to "
-                    "identify which policies should have applied. "
-                    "Ensure no 'break-glass' exclusions are being abused. "
-                    "If using legacy auth clients, block legacy auth via CA "
-                    "(policy: block when clientAppTypes includes exchangeActiveSync/other)."
-                ),
+                recommendation=recommendation,
             ))
 
         return findings
@@ -1596,6 +1803,143 @@ class CorrelationEngine:
 
 _SEV_LABEL = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
 _W = 80  # report width
+
+
+def _write_remediation_script(findings: list[Finding], path: Path) -> None:
+    """
+    Write remediation_commands.ps1 to *path*.
+
+    Generates PowerShell commands (Microsoft.Graph module) for each HIGH/MEDIUM
+    finding, grouped by finding ID with comments.  A $DryRun switch at the top
+    gates all destructive commands — analysts review before running.
+    """
+    lines: list[str] = [
+        "# ============================================================",
+        "# CIRRUS — Auto-generated Remediation Script",
+        f"# Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        "#",
+        "# REVIEW ALL COMMANDS BEFORE RUNNING.",
+        "# Set $DryRun = $false to execute; $true only prints what would happen.",
+        "# Requires: Microsoft.Graph PowerShell module (Connect-MgGraph first).",
+        "# ============================================================",
+        "",
+        '$DryRun = $true  # Change to $false to execute',
+        "",
+        "function Invoke-Remediation {",
+        "    param([string]$Description, [scriptblock]$Command)",
+        "    Write-Host \"  → $Description\" -ForegroundColor Cyan",
+        "    if (-not $DryRun) { & $Command }",
+        "    else { Write-Host '    [DRY RUN — skipped]' -ForegroundColor Yellow }",
+        "}",
+        "",
+    ]
+
+    high_findings  = [f for f in findings if f.severity == "high"]
+    other_findings = [f for f in findings if f.severity != "high"]
+
+    for group_label, group in (("HIGH severity findings", high_findings),
+                                ("MEDIUM / other findings", other_findings)):
+        if not group:
+            continue
+        lines.append(f"# ── {group_label} {'─' * (55 - len(group_label))}")
+        lines.append("")
+
+        for finding in group:
+            sev_tag = "⚠ HIGH" if finding.severity == "high" else finding.severity.upper()
+            lines.append(f"# [{sev_tag}] {finding.id}: {finding.title}")
+            if finding.mitre_techniques:
+                lines.append(f"#   MITRE: {', '.join(finding.mitre_techniques[:2])}")
+            lines.append("")
+
+            user = finding.user or ""
+
+            # --- Rule-specific commands ---
+            rule = finding.rule
+
+            if rule in ("bec_attack_pattern", "dual_exfiltration_channels"):
+                if user:
+                    lines += [
+                        f"# Revoke active sessions for {user}",
+                        f"Invoke-Remediation -Description 'Revoke sessions: {user}' -Command {{",
+                        f"    Revoke-MgUserSignInSession -UserId '{user}'",
+                        "}",
+                        f"# Remove SMTP forwarding on {user}'s mailbox",
+                        f"Invoke-Remediation -Description 'Remove SMTP forwarding: {user}' -Command {{",
+                        f"    Set-Mailbox -Identity '{user}' -ForwardingSmtpAddress $null -DeliverToMailboxAndForward $false",
+                        "}",
+                        f"# List and remove suspicious inbox rules for {user} (review before running):",
+                        f"# Get-InboxRule -Mailbox '{user}' | Where-Object {{ $_.Enabled }} | Select-Object Name, Description",
+                        f"# Remove-InboxRule -Mailbox '{user}' -Identity '<RuleName>' -Confirm:$false",
+                    ]
+
+            elif rule == "oauth_phishing_pattern":
+                if user:
+                    lines += [
+                        f"# Revoke OAuth grants for {user}",
+                        f"Invoke-Remediation -Description 'Revoke OAuth grants: {user}' -Command {{",
+                        f"    Get-MgUserOauth2PermissionGrant -UserId '{user}' |",
+                        f"    ForEach-Object {{ Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id }}",
+                        "}",
+                        f"Invoke-Remediation -Description 'Revoke sessions: {user}' -Command {{",
+                        f"    Revoke-MgUserSignInSession -UserId '{user}'",
+                        "}",
+                    ]
+
+            elif rule in ("suspicious_signin_then_persistence", "password_reset_then_mfa_registered",
+                          "spray_then_escalation", "privilege_escalation_after_signin",
+                          "device_code_then_device_registered"):
+                if user:
+                    lines += [
+                        f"# Revoke all sessions and disable account for {user} (re-enable after investigation)",
+                        f"Invoke-Remediation -Description 'Revoke sessions: {user}' -Command {{",
+                        f"    Revoke-MgUserSignInSession -UserId '{user}'",
+                        "}",
+                        f"# Review and remove suspicious MFA methods for {user}:",
+                        f"# Get-MgUserAuthenticationMethod -UserId '{user}'",
+                        f"# Remove-MgUserAuthenticationMethod* cmdlet matching the method type",
+                        f"# Review recently registered devices:",
+                        f"# Get-MgUserRegisteredDevice -UserId '{user}' | Select-Object DisplayName, RegistrationDateTime",
+                    ]
+
+            elif rule == "password_spray":
+                spray_ips = [
+                    ev.get("record", {}).get("ipAddress") or ""
+                    for ev in (finding.evidence or [])
+                    if ev.get("record", {}).get("ipAddress")
+                ]
+                spray_ips = list(dict.fromkeys(ip for ip in spray_ips if ip))[:4]
+                if spray_ips:
+                    lines += [
+                        "# Block spray source IP(s) via Conditional Access Named Locations",
+                        "# (Use the Entra portal: Security → Conditional Access → Named Locations → + IP ranges)",
+                    ]
+                    for ip in spray_ips:
+                        lines.append(f"#   Block IP: {ip}")
+
+            elif rule == "mass_mail_access":
+                if user:
+                    lines += [
+                        f"# Revoke sessions and review OAuth apps for {user}",
+                        f"Invoke-Remediation -Description 'Revoke sessions: {user}' -Command {{",
+                        f"    Revoke-MgUserSignInSession -UserId '{user}'",
+                        "}",
+                        f"# Audit mailbox access by delegated apps:",
+                        f"# Search-UnifiedAuditLog -UserIds '{user}' -Operations MailItemsAccessed -StartDate ... -EndDate ...",
+                    ]
+
+            lines.append("")
+
+    if not any(f.severity in ("high", "medium") for f in findings):
+        lines.append("# No HIGH or MEDIUM findings — no remediation commands generated.")
+        lines.append("")
+
+    lines += [
+        "# ── End of generated script ──────────────────────────────────────────",
+        "Write-Host 'Remediation script complete.' -ForegroundColor Green",
+        "if ($DryRun) { Write-Host 'Set $DryRun = $false and re-run to execute.' -ForegroundColor Yellow }",
+    ]
+
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_text_report(report: dict[str, Any], findings: list[Finding], path: Path) -> None:

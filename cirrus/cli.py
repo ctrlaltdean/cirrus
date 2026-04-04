@@ -1818,6 +1818,13 @@ def triage(
     all_raw: dict[str, list[dict]] = _defaultdict(list)
     any_mailbox_consent_needed = False
 
+    console.print(
+        "[dim]  Legend:  [red]✗ HIGH[/red] — escalate immediately  "
+        "· [yellow]⚠ WARN[/yellow] — investigate further  "
+        "· [green]✓ CLEAN[/green] — no indicators  "
+        "· [dim]– SKIP[/dim] — check not applicable (missing licence or role)[/dim]\n"
+    )
+
     for upn in target_users:
         console.print(
             f"[bold]Running triage:[/bold]  {upn}  "

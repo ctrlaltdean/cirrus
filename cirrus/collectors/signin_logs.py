@@ -21,6 +21,7 @@ Key IOCs surfaced:
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -84,6 +85,20 @@ _IDENTITY_RISK_DETAILS: frozenset[str] = frozenset({
 
 # How close two sign-ins must be (in hours) to trigger IMPOSSIBLE_TRAVEL
 _IMPOSSIBLE_TRAVEL_HOURS = 2.0
+
+# Minimum great-circle distance (km) to flag as impossible travel when
+# coordinates are available. Prevents false positives for border cities.
+_IMPOSSIBLE_TRAVEL_MIN_KM = 500
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in kilometres between two lat/lon points."""
+    r = 6371.0  # Earth radius km
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lam = math.radians(lon2 - lon1)
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lam / 2) ** 2
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def _parse_signin_dt(record: dict) -> datetime:
@@ -180,10 +195,17 @@ def _detect_impossible_travel(records: list[dict]) -> None:
     """
     Cross-record impossible travel detection.
 
-    Groups records by user, sorts by time, then flags consecutive sign-ins
-    from different countries that occur within _IMPOSSIBLE_TRAVEL_HOURS.
-    Appends IMPOSSIBLE_TRAVEL flags directly to each record's _iocFlags list.
+    Groups records by user, sorts by time, then checks consecutive sign-ins
+    for physical impossibility using two strategies:
 
+    1. Coordinate-based (preferred): uses geoCoordinates (lat/lon) from the
+       sign-in record to compute great-circle distance. Flags pairs where
+       distance > 500 km and elapsed time < 2 h.
+
+    2. Country-based (fallback): flags pairs from different countries within
+       2 h when coordinates are not available.
+
+    Appends IMPOSSIBLE_TRAVEL flags directly to each record's _iocFlags list.
     This supplements Microsoft's own impossibleTravel riskDetail, which
     requires Identity Protection licensing — this runs on raw sign-in data
     with no licensing dependency.
@@ -201,23 +223,50 @@ def _detect_impossible_travel(records: list[dict]) -> None:
             r1 = sorted_recs[i]
             r2 = sorted_recs[i + 1]
 
-            country1 = (r1.get("location") or {}).get("countryOrRegion") or ""
-            country2 = (r2.get("location") or {}).get("countryOrRegion") or ""
-
-            if not country1 or not country2 or country1 == country2:
-                continue
-
             dt1 = _parse_signin_dt(r1)
             dt2 = _parse_signin_dt(r2)
             diff_hours = (dt2 - dt1).total_seconds() / 3600
 
-            if diff_hours <= _IMPOSSIBLE_TRAVEL_HOURS:
+            if diff_hours > _IMPOSSIBLE_TRAVEL_HOURS or diff_hours < 0:
+                continue
+
+            loc1 = r1.get("location") or {}
+            loc2 = r2.get("location") or {}
+            geo1 = loc1.get("geoCoordinates") or {}
+            geo2 = loc2.get("geoCoordinates") or {}
+            country1 = loc1.get("countryOrRegion") or ""
+            country2 = loc2.get("countryOrRegion") or ""
+
+            lat1 = geo1.get("latitude")
+            lon1 = geo1.get("longitude")
+            lat2 = geo2.get("latitude")
+            lon2 = geo2.get("longitude")
+
+            if lat1 is not None and lon1 is not None and lat2 is not None and lon2 is not None:
+                # Coordinate-based: compute actual distance
+                try:
+                    dist_km = _haversine_km(float(lat1), float(lon1), float(lat2), float(lon2))
+                except (TypeError, ValueError):
+                    dist_km = 0.0
+                if dist_km < _IMPOSSIBLE_TRAVEL_MIN_KM:
+                    continue  # too close to be suspicious (e.g. border cities)
+                loc_label1 = f"{loc1.get('city') or country1 or 'unknown'}"
+                loc_label2 = f"{loc2.get('city') or country2 or 'unknown'}"
+                flag = (
+                    f"IMPOSSIBLE_TRAVEL:{loc_label1}->{loc_label2}"
+                    f":{diff_hours:.1f}h:{int(dist_km)}km"
+                )
+            else:
+                # Coordinate fallback: country comparison
+                if not country1 or not country2 or country1 == country2:
+                    continue
                 flag = (
                     f"IMPOSSIBLE_TRAVEL:{country1}->{country2}"
                     f":{diff_hours:.1f}h"
                 )
-                r1["_iocFlags"].append(flag)
-                r2["_iocFlags"].append(flag)
+
+            r1["_iocFlags"].append(flag)
+            r2["_iocFlags"].append(flag)
 
 
 class SignInLogsCollector(GraphCollector):

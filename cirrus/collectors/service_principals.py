@@ -48,6 +48,7 @@ class ServicePrincipalsCollector(GraphCollector):
                 "appRoles,keyCredentials,passwordCredentials,"
                 "replyUrls,servicePrincipalNames,tags"
             ),
+            "$expand": "owners($select=id,displayName,userPrincipalName)",
             "$top": 999,
         }
 
@@ -62,6 +63,10 @@ class ServicePrincipalsCollector(GraphCollector):
             sp["_iocFlags"] = _flag_sp(sp)
 
         return records
+
+
+# Microsoft's own tenant ID — SPs owned by Microsoft are first-party apps
+_MSFT_TENANT_ID = "f8cdef31-a31e-4b4a-93e4-5f571e91255a"
 
 
 def _flag_sp(sp: dict) -> list[str]:
@@ -87,5 +92,17 @@ def _flag_sp(sp: dict) -> list[str]:
     # Disabled account still has credentials
     if not sp.get("accountEnabled") and total_creds > 0:
         flags.append("DISABLED_WITH_CREDENTIALS")
+
+    # Orphaned SP — no owners assigned, has active credentials, not a Microsoft first-party app.
+    # Attackers create ownerless apps as backdoors because they're invisible in ownership audits.
+    owners = sp.get("owners") or []
+    is_msft_app = (sp.get("appOwnerOrganizationId") or "").lower() == _MSFT_TENANT_ID
+    if (
+        not owners
+        and total_creds > 0
+        and not is_msft_app
+        and sp.get("servicePrincipalType") == "Application"
+    ):
+        flags.append("NO_OWNER_WITH_CREDENTIALS")
 
     return flags

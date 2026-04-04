@@ -37,6 +37,41 @@ HIGH_RISK_SCOPES = {
     "offline_access",  # allows persistent access without re-consent
 }
 
+# Dangerous scope combinations — each tuple (set_a, set_b, flag_name, description)
+# fires when a grant contains at least one scope from set_a AND one from set_b.
+# Individual HIGH_RISK_SCOPE flags are still raised; these flags add the combo context.
+_DANGEROUS_COMBOS: list[tuple[frozenset, frozenset, str, str]] = [
+    (
+        # Can read mail + can change forwarding rules = full silent BEC exfil chain
+        frozenset({"Mail.Read", "Mail.ReadWrite", "Mail.ReadBasic", "full_access_as_user"}),
+        frozenset({"MailboxSettings.ReadWrite"}),
+        "COMBO_MAIL_READ_AND_FORWARDING_CONTROL",
+        "App can both read mail and control forwarding settings — complete silent exfil chain",
+    ),
+    (
+        # Can read all files + can enumerate users/directory = broad data exfil
+        frozenset({"Files.Read.All", "Files.ReadWrite.All"}),
+        frozenset({"Directory.Read.All", "Directory.ReadWrite.All", "User.Read.All", "User.ReadWrite.All"}),
+        "COMBO_FILES_AND_DIRECTORY_ACCESS",
+        "App can access all files and enumerate the directory — broad data exfiltration capability",
+    ),
+    (
+        # Can manage roles + any mail/file access = privilege escalation + exfil
+        frozenset({"RoleManagement.ReadWrite.Directory"}),
+        frozenset({"Mail.Read", "Mail.ReadWrite", "Files.Read.All", "Files.ReadWrite.All",
+                   "Directory.ReadWrite.All", "User.ReadWrite.All"}),
+        "COMBO_ROLE_MANAGEMENT_AND_DATA_ACCESS",
+        "App can modify directory roles and access sensitive data — privilege escalation and exfil",
+    ),
+    (
+        # offline_access + any mail scope = persistent silent mail access that survives password reset
+        frozenset({"offline_access"}),
+        frozenset({"Mail.Read", "Mail.ReadWrite", "full_access_as_user"}),
+        "COMBO_PERSISTENT_MAIL_ACCESS",
+        "App has persistent mail access via offline_access — survives password resets",
+    ),
+]
+
 
 class OAuthGrantsCollector(GraphCollector):
     name = "oauth_grants"
@@ -90,7 +125,14 @@ def _flag_grant(scope_string: str) -> list[str]:
     if not scope_string:
         return flags
     scopes = {s.strip() for s in scope_string.split()}
+
     for scope in scopes:
         if scope in HIGH_RISK_SCOPES:
             flags.append(f"HIGH_RISK_SCOPE:{scope}")
+
+    # Dangerous combinations — flag when a single grant contains both risky scope groups
+    for set_a, set_b, combo_flag, _ in _DANGEROUS_COMBOS:
+        if scopes & set_a and scopes & set_b:
+            flags.append(combo_flag)
+
     return flags

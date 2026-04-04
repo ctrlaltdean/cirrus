@@ -142,6 +142,9 @@ class UnifiedAuditCollector(GraphCollector):
 
             mins, secs = divmod(int(elapsed), 60)
             elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+            remaining = max(0, poll_timeout - int(elapsed))
+            rem_mins, rem_secs = divmod(remaining, 60)
+            remaining_str = f"{rem_mins}m {rem_secs}s" if rem_mins else f"{rem_secs}s"
 
             if status == "notstarted":
                 if not_started_since is None:
@@ -158,14 +161,14 @@ class UnifiedAuditCollector(GraphCollector):
                     )
                 if self.on_status:
                     self.on_status(
-                        f"query queued — {elapsed_str} elapsed "
+                        f"queued — {elapsed_str} elapsed, timeout in {remaining_str} "
                         f"(waiting for Microsoft to begin processing)"
                     )
             else:
                 not_started_since = None  # reset if status advances
                 if self.on_status:
                     self.on_status(
-                        f"query {status or 'running'} — {elapsed_str} elapsed"
+                        f"{status or 'running'} — {elapsed_str} elapsed, timeout in {remaining_str}"
                     )
 
             time.sleep(POLL_INTERVAL)

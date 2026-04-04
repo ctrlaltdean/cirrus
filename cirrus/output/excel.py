@@ -55,10 +55,26 @@ def _sheet_name(stem: str, existing: set[str]) -> str:
     return name  # give up — openpyxl will raise if truly duplicate
 
 
-def _build_summary_sheet(wb, case_dir: Path) -> None:  # type: ignore[no-untyped-def]
+# Map triage check labels → triage CSV stem (for intra-workbook hyperlinks)
+_CHECK_LABEL_TO_STEM: dict[str, str] = {
+    "Sign-in activity": "sign_ins",
+    "MFA methods":      "mfa_methods",
+    "Inbox rules":      "inbox_rules",
+    "Mail forwarding":  "mail_forwarding",
+    "OAuth grants":     "oauth_grants",
+    "Registered devices": "devices",
+    "Directory audit":  "audit_activity",
+    "Identity Protection": "risky_status",
+}
+
+
+def _build_summary_sheet(wb, case_dir: Path, sheet_map: dict[str, str] | None = None) -> None:  # type: ignore[no-untyped-def]
     """
     Prepend a Summary sheet to *wb* using triage_report.json if available,
     or a plain cover page with case metadata if not.
+
+    sheet_map: optional dict mapping csv_stem → actual Excel sheet name,
+               used to add intra-workbook hyperlinks in the Check Detail table.
     """
     try:
         import openpyxl
@@ -178,8 +194,23 @@ def _build_summary_sheet(wb, case_dir: Path) -> None:  # type: ignore[no-untyped
             s_bg = _STATUS_FILL.get(status, "F8FAFC")
             s_fg = _STATUS_TEXT.get(status, "000000")
             flags_str = "  ·  ".join(check.get("flags", []))
+            label = check.get("label", "")
             _cell(row, 1, upn, bg=s_bg)
-            _cell(row, 2, check.get("label", ""), bg=s_bg)
+
+            # Check label cell — hyperlink to the corresponding data sheet if available
+            label_cell = ws.cell(row=row, column=2, value=label)
+            label_cell.font = Font(color="000000")
+            label_cell.fill = PatternFill("solid", fgColor=s_bg)
+            label_cell.alignment = Alignment(horizontal="left", vertical="center")
+            if sheet_map:
+                stem = _CHECK_LABEL_TO_STEM.get(label)
+                target_sheet = sheet_map.get(stem) if stem else None
+                if target_sheet:
+                    # openpyxl intra-workbook hyperlink: #'Sheet Name'!A1
+                    safe_name = target_sheet.replace("'", "''")
+                    label_cell.hyperlink = f"#'{safe_name}'!A1"
+                    label_cell.font = Font(color="1F4E79", underline="single")
+
             _cell(row, 3, status.upper(), bold=True, fg=s_fg, bg=s_bg, align="center")
             _cell(row, 4, check.get("summary", ""), bg=s_bg, wrap=True)
             _cell(row, 5, flags_str, bg=s_bg, wrap=True)
@@ -226,11 +257,14 @@ def generate_workbook(case_dir: Path) -> Path | None:
     if not entries:
         return None
 
+    # Build sheet_map (csv_stem → sheet_name) for intra-workbook hyperlinks in Summary
+    sheet_map: dict[str, str] = {csv_path.stem: sname for sname, csv_path, _ in entries}
+
     wb = openpyxl.Workbook()
     wb.remove(wb.active)  # discard the default empty sheet
 
     # Summary sheet is always first
-    _build_summary_sheet(wb, case_dir)
+    _build_summary_sheet(wb, case_dir, sheet_map=sheet_map)
 
     for sheet_name, csv_path, hdr_colour in entries:
         try:
