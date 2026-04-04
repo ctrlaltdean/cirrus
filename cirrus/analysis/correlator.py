@@ -1705,9 +1705,14 @@ class CorrelationEngine:
         if not signin_records:
             return []
 
-        # Determine whether the tenant has any CA policies configured
-        ca_policies = self._d("conditional_access_policies")
-        tenant_has_ca = bool(ca_policies)
+        # Infer whether the tenant has CA configured by checking whether any
+        # sign-in in the dataset was evaluated against CA policies (even if the
+        # result was "notApplied"). An empty appliedConditionalAccessPolicies
+        # list means CA was not invoked for that session.
+        tenant_has_ca = any(
+            bool(r.get("appliedConditionalAccessPolicies"))
+            for r in signin_records
+        )
 
         by_user: dict[str, list[dict]] = defaultdict(list)
         for r in signin_records:
@@ -1734,17 +1739,6 @@ class CorrelationEngine:
             # Only flag if there are multiple CA-gap sign-ins (reduces noise on SPNs/service accounts)
             if len(no_ca_records) < 2:
                 continue
-
-            # If the tenant has no CA policies at all, only fire when the user also
-            # has suspicious sign-in flags — otherwise every clean user in a no-CA
-            # tenant generates a finding, which drowns out real signals.
-            if not tenant_has_ca:
-                has_suspicious = any(
-                    _has_flag_prefix(r, *_SUSPICIOUS_SIGNIN_PREFIXES)
-                    for r in no_ca_records
-                )
-                if not has_suspicious:
-                    continue
 
             apps: list[str] = list({
                 r.get("clientAppUsed") or r.get("appDisplayName") or "unknown"
@@ -1916,12 +1910,13 @@ def _write_remediation_script(findings: list[Finding], path: Path) -> None:
                     ]
 
             elif rule == "password_spray":
-                spray_ips = [
-                    ev.get("record", {}).get("ipAddress") or ""
+                # Extract spray IPs from PUBLIC_IP: flags in evidence
+                spray_ips = list(dict.fromkeys(
+                    f[len("PUBLIC_IP:"):]
                     for ev in (finding.evidence or [])
-                    if ev.get("record", {}).get("ipAddress")
-                ]
-                spray_ips = list(dict.fromkeys(ip for ip in spray_ips if ip))[:4]
+                    for f in ev.flags
+                    if f.startswith("PUBLIC_IP:")
+                ))[:4]
                 if spray_ips:
                     lines += [
                         "# Block spray source IP(s) via Conditional Access Named Locations",

@@ -201,7 +201,7 @@ class TestSuspiciousSigninThenPersistence:
             upn=self.UPN,
             ioc_flags=["SUSPICIOUS_AUTH_PROTOCOL:deviceCode"],
         )
-        mfa = make_mfa(upn=self.UPN, ioc_flags=["RECENTLY_ADDED", "HIGH_PERSISTENCE_METHOD"])
+        mfa = make_mfa(upn=self.UPN, ioc_flags=["RECENTLY_ADDED:2026-01-15", "HIGH_PERSISTENCE_METHOD:microsoftAuthenticator"])
         write_case_files(tmp_path, signin_logs=[signin], mfa_methods=[mfa])
         report = run(tmp_path)
         findings = findings_for_rule(report, "suspicious_signin_then_persistence")
