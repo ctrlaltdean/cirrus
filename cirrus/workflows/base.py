@@ -337,14 +337,19 @@ def render_findings(report: dict) -> None:
     )
 
 
-def _run_correlation(case_dir: Path, result: "WorkflowResult", case: "Case") -> None:
+def _run_correlation(
+    case_dir: Path,
+    result: "WorkflowResult",
+    case: "Case",
+    sensitivity: str = "medium",
+) -> None:
     """
     Run the cross-collector correlation engine and log the result.
     Import is deferred to keep startup fast and avoid circular imports.
     """
     try:
         from cirrus.analysis.correlator import run_correlator
-        report = run_correlator(case_dir)
+        report = run_correlator(case_dir, sensitivity=sensitivity)
         finding_count = report["summary"]["total_findings"]
         high_count = report["summary"].get("high", 0)
 

@@ -173,6 +173,7 @@ CollectOnlyOpt = Annotated[bool, typer.Option("--collect-only", help="Collect ev
 ExistingCaseOpt = Annotated[Optional[Path], typer.Option("--existing-case", help="Continue collection into an existing case folder instead of creating a new one.")]
 UalTimeoutOpt = Annotated[int, typer.Option("--ual-timeout", help="Maximum seconds to wait for the Unified Audit Log async query to complete (default 7200 = 2 h). Increase for very large tenants or long date ranges.")]
 AppIdOpt = Annotated[Optional[str], typer.Option("--app-id", help="App/service principal ID to focus the investigation on. Filters SP sign-in logs to this app. Omit to investigate all apps.")]
+SensitivityOpt = Annotated[str, typer.Option("--sensitivity", help="Rule sensitivity: low (enterprise, less noise), medium (default), or high (SMB, catch low-volume attacks).")]
 
 _DATE_FMT = "%Y-%m-%d"
 # Maximum UAL retention periods (informational — shown in the wizard).
@@ -686,6 +687,7 @@ def _maybe_run_analysis(
     result: "WorkflowResult",
     collect_only: bool,
     interactive: bool,
+    sensitivity: str = "medium",
 ) -> None:
     """
     Run cross-collector correlation + HTML report after a workflow completes.
@@ -713,7 +715,7 @@ def _maybe_run_analysis(
             return
 
     from cirrus.workflows.base import _run_correlation
-    _run_correlation(case.case_dir, result, case)
+    _run_correlation(case.case_dir, result, case, sensitivity=sensitivity)
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +738,7 @@ def run_bec(
     collect_only: CollectOnlyOpt = False,
     existing_case: ExistingCaseOpt = None,
     ual_timeout: UalTimeoutOpt = 7200,
+    sensitivity: SensitivityOpt = "medium",
 ) -> None:
     """
     [bold]BEC Investigation Workflow[/bold]
@@ -823,7 +826,7 @@ def run_bec(
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors. Check case_audit.txt for details.[/yellow]")
     console.print("[bold green]BEC collection complete.[/bold green]")
 
-    _maybe_run_analysis(case, result, collect_only, interactive)
+    _maybe_run_analysis(case, result, collect_only, interactive, sensitivity=sensitivity)
     case.close()
 
 
@@ -843,6 +846,7 @@ def run_ato(
     collect_only: CollectOnlyOpt = False,
     existing_case: ExistingCaseOpt = None,
     ual_timeout: UalTimeoutOpt = 7200,
+    sensitivity: SensitivityOpt = "medium",
 ) -> None:
     """
     [bold]Account Takeover (ATO) Investigation Workflow[/bold]
@@ -936,7 +940,7 @@ def run_ato(
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors. Check case_audit.txt for details.[/yellow]")
     console.print("[bold green]ATO collection complete.[/bold green]")
 
-    _maybe_run_analysis(case, result, collect_only, interactive)
+    _maybe_run_analysis(case, result, collect_only, interactive, sensitivity=sensitivity)
     case.close()
 
 
@@ -956,6 +960,7 @@ def run_bec_ato(
     collect_only: CollectOnlyOpt = False,
     existing_case: ExistingCaseOpt = None,
     ual_timeout: UalTimeoutOpt = 7200,
+    sensitivity: SensitivityOpt = "medium",
 ) -> None:
     """
     [bold]BEC + ATO Combined Investigation Workflow[/bold]
@@ -1047,7 +1052,7 @@ def run_bec_ato(
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors. Check case_audit.txt for details.[/yellow]")
     console.print("[bold green]BEC + ATO collection complete.[/bold green]")
 
-    _maybe_run_analysis(case, result, collect_only, interactive)
+    _maybe_run_analysis(case, result, collect_only, interactive, sensitivity=sensitivity)
     case.close()
 
 
@@ -1066,6 +1071,7 @@ def run_full(
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
     ual_timeout: UalTimeoutOpt = 7200,
+    sensitivity: SensitivityOpt = "medium",
 ) -> None:
     """
     [bold]Full Tenant Collection Workflow[/bold]
@@ -1149,7 +1155,7 @@ def run_full(
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors.[/yellow]")
     console.print("[bold green]Full collection complete.[/bold green]")
 
-    _maybe_run_analysis(case, result, collect_only, interactive)
+    _maybe_run_analysis(case, result, collect_only, interactive, sensitivity=sensitivity)
     case.close()
 
 
@@ -1168,6 +1174,7 @@ def run_sp(
     client_id: ClientIdOpt = None,
     collect_only: CollectOnlyOpt = False,
     ual_timeout: UalTimeoutOpt = 7200,
+    sensitivity: SensitivityOpt = "medium",
 ) -> None:
     """
     [bold]Service Principal / OAuth App Compromise Investigation[/bold]
@@ -1260,7 +1267,7 @@ def run_sp(
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors.[/yellow]")
     console.print("[bold green]SP compromise collection complete.[/bold green]")
 
-    _maybe_run_analysis(case, result, collect_only, interactive)
+    _maybe_run_analysis(case, result, collect_only, interactive, sensitivity=sensitivity)
     case.close()
 
 
@@ -2789,6 +2796,7 @@ def hunt(
 @app.command("analyze")
 def analyze(
     case_dir: Annotated[Path, typer.Argument(help="Path to the case folder to analyze.")],
+    sensitivity: SensitivityOpt = "medium",
 ) -> None:
     """
     Run the cross-collector correlation engine against an existing case folder.
@@ -2809,7 +2817,7 @@ def analyze(
     from cirrus.workflows.base import render_findings
     console.print(f"\n[bold]Running correlation engine on:[/bold] {case_dir}\n")
 
-    report = run_correlator(case_dir)
+    report = run_correlator(case_dir, sensitivity=sensitivity)
 
     loaded = ", ".join(report.get("collectors_loaded") or [])
     console.print(f"[dim]Collectors loaded:[/dim] {loaded or 'none'}\n")

@@ -90,10 +90,17 @@ _COLLECTOR_FILES = {
     "pim_activations":    "pim_activations.json",
 }
 
-# Minimum thresholds for spray / mass-access rules
+# Default thresholds for spray / mass-access rules (sensitivity="medium")
 _SPRAY_MIN_TARGETS  = 5   # distinct accounts from one IP to trigger password spray
 _SPRAY_MIN_FAILURES = 10  # total failed attempts from one IP to trigger password spray
 _MAIL_ACCESS_THRESHOLD = 50  # MailItemsAccessed events to trigger mass mail access
+
+# Per-sensitivity overrides: (spray_min_targets, spray_min_failures, mail_access_threshold)
+_SENSITIVITY_THRESHOLDS: dict[str, tuple[int, int, int]] = {
+    "low":    (10, 20, 100),  # enterprise / large tenant — reduce noise
+    "medium": (5,  10,  50),  # default
+    "high":   (3,   5,  20),  # SMB / small tenant — catch low-volume attacks
+}
 
 # Suspicious sign-in flag prefixes that trigger persistence checks
 _SUSPICIOUS_SIGNIN_PREFIXES = (
@@ -292,10 +299,16 @@ class CorrelationEngine:
     all correlation rules to produce a list of cross-collector findings.
     """
 
-    def __init__(self, case_dir: Path) -> None:
+    def __init__(self, case_dir: Path, sensitivity: str = "medium") -> None:
         self.case_dir = case_dir
         self._data: dict[str, list[dict]] = {}
         self._loaded: list[str] = []
+        sens = sensitivity if sensitivity in _SENSITIVITY_THRESHOLDS else "medium"
+        t = _SENSITIVITY_THRESHOLDS[sens]
+        self._spray_min_targets  = t[0]
+        self._spray_min_failures = t[1]
+        self._mail_access_threshold = t[2]
+        self.sensitivity = sens
 
     # ── Public interface ───────────────────────────────────────────────────────
 
@@ -353,6 +366,7 @@ class CorrelationEngine:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "case_dir": str(self.case_dir),
             "collectors_loaded": self._loaded,
+            "sensitivity": self.sensitivity,
             "summary": {
                 "total_findings": len(findings),
                 **counts,
@@ -951,9 +965,9 @@ class CorrelationEngine:
                 for r in failures
                 if r.get("userPrincipalName")
             }
-            if len(distinct_targets) < _SPRAY_MIN_TARGETS:
+            if len(distinct_targets) < self._spray_min_targets:
                 continue
-            if len(failures) < _SPRAY_MIN_FAILURES:
+            if len(failures) < self._spray_min_failures:
                 continue
             if ip in reported_ips:
                 continue
@@ -1062,7 +1076,7 @@ class CorrelationEngine:
 
         spray_ips = {
             ip for ip, targets in ip_failures.items()
-            if len(targets) >= _SPRAY_MIN_TARGETS
+            if len(targets) >= self._spray_min_targets
         }
         if not spray_ips:
             return []
@@ -1217,7 +1231,7 @@ class CorrelationEngine:
 
         findings: list[Finding] = []
         for upn, records in by_user.items():
-            if len(records) < _MAIL_ACCESS_THRESHOLD:
+            if len(records) < self._mail_access_threshold:
                 continue
 
             has_signin = upn in users_with_signin
@@ -2042,10 +2056,10 @@ def _finding_to_dict(f: Finding) -> dict:
 
 # ── Convenience function ───────────────────────────────────────────────────────
 
-def run_correlator(case_dir: Path) -> dict[str, Any]:
+def run_correlator(case_dir: Path, sensitivity: str = "medium") -> dict[str, Any]:
     """
     Run the correlation engine against a case directory and return the report.
     Writes ioc_correlation.json to case_dir as a side effect.
     """
-    engine = CorrelationEngine(case_dir)
+    engine = CorrelationEngine(case_dir, sensitivity=sensitivity)
     return engine.run()
