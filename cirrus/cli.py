@@ -70,6 +70,7 @@ from cirrus.workflows.base import render_summary
 from cirrus.workflows.bec import BECWorkflow
 from cirrus.workflows.bec_ato import BECATOWorkflow
 from cirrus.workflows.full import FullWorkflow
+from cirrus.workflows.sp_compromise import SPCompromiseWorkflow
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -171,6 +172,7 @@ OptionalTenantOpt = Annotated[Optional[str], typer.Option("--tenant", "-t", help
 CollectOnlyOpt = Annotated[bool, typer.Option("--collect-only", help="Collect evidence only — skip correlation analysis and HTML report. Fastest option when you know exactly what you need.")]
 ExistingCaseOpt = Annotated[Optional[Path], typer.Option("--existing-case", help="Continue collection into an existing case folder instead of creating a new one.")]
 UalTimeoutOpt = Annotated[int, typer.Option("--ual-timeout", help="Maximum seconds to wait for the Unified Audit Log async query to complete (default 7200 = 2 h). Increase for very large tenants or long date ranges.")]
+AppIdOpt = Annotated[Optional[str], typer.Option("--app-id", help="App/service principal ID to focus the investigation on. Filters SP sign-in logs to this app. Omit to investigate all apps.")]
 
 _DATE_FMT = "%Y-%m-%d"
 # Maximum UAL retention periods (informational — shown in the wizard).
@@ -1146,6 +1148,117 @@ def run_full(
     if result.errors:
         console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors.[/yellow]")
     console.print("[bold green]Full collection complete.[/bold green]")
+
+    _maybe_run_analysis(case, result, collect_only, interactive)
+    case.close()
+
+
+@run_app.command("sp")
+def run_sp(
+    tenant: TenantRunOpt = None,
+    output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
+    case_name: CaseNameOpt = None,
+    days: DaysOpt = None,
+    start_date: StartDateOpt = None,
+    end_date: EndDateOpt = None,
+    app_id: AppIdOpt = None,
+    user: UserOpt = None,
+    users: UsersOpt = None,
+    users_file: UsersFileOpt = None,
+    client_id: ClientIdOpt = None,
+    collect_only: CollectOnlyOpt = False,
+    ual_timeout: UalTimeoutOpt = 7200,
+) -> None:
+    """
+    [bold]Service Principal / OAuth App Compromise Investigation[/bold]
+
+    Investigates compromised OAuth applications and service principals.
+    Use when you have evidence of OAuth phishing, a leaked client secret,
+    an anomalous app authentication, or a rogue app registered as a backdoor.
+
+    Collects: service principals, app registrations, OAuth grants, SP sign-in
+    logs, user directory, Entra audit logs (consent & SP events), and the
+    Unified Audit Log (app-token operations on mailboxes and files).
+
+    Use --app-id to focus on a specific application; omit to investigate all
+    apps (broader sweep useful when the rogue app is not yet identified).
+
+    Run without flags to launch the interactive wizard.
+
+    Examples (scripted):
+        cirrus run sp --tenant contoso.com --days 30
+        cirrus run sp --tenant contoso.com --app-id <app-id> --days 30
+        cirrus run sp --tenant contoso.com --start-date 2026-03-01 --end-date 2026-03-18
+    """
+    _banner()
+    interactive = tenant is None
+    if interactive:
+        console.print(Panel.fit(
+            "[bold]Service Principal Compromise Wizard[/bold]\n"
+            "[dim]Answer a few questions to configure your collection run.\n"
+            "Press Ctrl+C at any time to cancel.[/dim]",
+            border_style="bright_blue",
+        ))
+        console.print()
+        tenant = _prompt_tenant()
+        if not app_id:
+            app_id_input = Prompt.ask(
+                "App ID to investigate [dim](optional — leave blank to collect all apps)[/dim]",
+                default="",
+            ).strip()
+            app_id = app_id_input or None
+    else:
+        console.print(f"[bold magenta]Workflow:[/bold magenta] Service Principal Compromise")
+        console.print(f"[bold]Tenant:[/bold]  [cyan]{tenant}[/cyan]")
+        if app_id:
+            console.print(f"[bold]App ID:[/bold]  [cyan]{app_id}[/cyan]")
+        console.print()
+
+    target_users = _resolve_users(user, users, users_file, False)
+    start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
+
+    if interactive and case_name is None:
+        case_name_input = Prompt.ask(
+            "Case name [dim](optional — e.g. INC-2026-001, leave blank to auto-generate)[/dim]",
+            default="",
+        ).strip()
+        case_name = case_name_input or None
+
+    _show_run_summary("sp", tenant, target_users, start_dt, end_dt, output_dir, case_name)
+
+    token, _ = _authenticate(tenant, client_id)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    case = Case.create(tenant, output_dir, case_name)
+    console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
+
+    case.audit.log_event("WORKFLOW_CONFIG", {
+        "workflow": "sp",
+        "tenant": tenant,
+        "start_date": start_dt.strftime(_DATE_FMT),
+        "end_date": end_dt.strftime(_DATE_FMT),
+        "app_id": app_id or "all",
+    })
+
+    _client_id = client_id
+    token_provider = lambda: get_token(tenant, **({'client_id': _client_id} if _client_id else {}))
+    workflow = SPCompromiseWorkflow(token, case, token_provider=token_provider)
+    result = workflow.run(
+        users=target_users or None,
+        tenant=tenant,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        extra_params={
+            "ual_timeout": ual_timeout,
+            "app_ids": [app_id] if app_id else None,
+        },
+        run_analysis=False,
+    )
+
+    render_summary(result)
+    if result.errors:
+        console.print(f"[yellow]⚠ {len(result.errors)} collector(s) encountered errors.[/yellow]")
+    console.print("[bold green]SP compromise collection complete.[/bold green]")
 
     _maybe_run_analysis(case, result, collect_only, interactive)
     case.close()
