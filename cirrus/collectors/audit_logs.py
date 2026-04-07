@@ -256,9 +256,10 @@ class AuditLogsCollector(GraphCollector):
         }
 
         # Nested property filters (initiatedBy/user/userPrincipalName) require
-        # advanced query support: ConsistencyLevel header (set globally) + $count=true.
-        if users:
-            params["$count"] = "true"
+        # advanced query support. The ConsistencyLevel: eventual header is set
+        # globally on the session and is sufficient — $count=true is NOT added
+        # here because /auditLogs/directoryAudits returns 400 "query option
+        # Count is not allowed" when $count is included.
 
         records = self._collect_all(f"{GRAPH_BASE}/auditLogs/directoryAudits", params)
 

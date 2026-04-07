@@ -81,8 +81,14 @@ class UnifiedAuditCollector(GraphCollector):
 
         Returns list of UAL record dicts.
         """
+        now = datetime.now(timezone.utc)
         if end_dt is None:
-            end_dt = datetime.now(timezone.utc)
+            end_dt = now
+        else:
+            # Cap to now: the UAL API rejects filterEndDateTime in the future
+            # with a 400. The CLI sets end_dt to 23:59:59 on the requested day,
+            # which is in the future when running earlier in the day.
+            end_dt = min(end_dt, now)
         if start_dt is None:
             start_dt = end_dt - timedelta(days=days)
 
