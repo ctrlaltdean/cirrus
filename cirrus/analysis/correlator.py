@@ -1866,6 +1866,13 @@ def _write_remediation_script(findings: list[Finding], path: Path) -> None:
 
             if rule in ("bec_attack_pattern", "dual_exfiltration_channels"):
                 if user:
+                    # Extract forwarding destinations from evidence flags for the comment header
+                    fwd_addrs = list(dict.fromkeys(
+                        f[len("FORWARDS_TO:"):]
+                        for ev in (finding.evidence or [])
+                        for f in ev.flags
+                        if f.startswith("FORWARDS_TO:")
+                    ))
                     lines += [
                         f"# Revoke active sessions for {user}",
                         f"Invoke-Remediation -Description 'Revoke sessions: {user}' -Command {{",
@@ -1875,9 +1882,27 @@ def _write_remediation_script(findings: list[Finding], path: Path) -> None:
                         f"Invoke-Remediation -Description 'Remove SMTP forwarding: {user}' -Command {{",
                         f"    Set-Mailbox -Identity '{user}' -ForwardingSmtpAddress $null -DeliverToMailboxAndForward $false",
                         "}",
-                        f"# List and remove suspicious inbox rules for {user} (review before running):",
-                        f"# Get-InboxRule -Mailbox '{user}' | Where-Object {{ $_.Enabled }} | Select-Object Name, Description",
-                        f"# Remove-InboxRule -Mailbox '{user}' -Identity '<RuleName>' -Confirm:$false",
+                    ]
+                    if fwd_addrs:
+                        lines.append(f"# Forwarding destinations identified: {', '.join(fwd_addrs[:4])}")
+                    lines += [
+                        f"# Disable suspicious inbox rules for {user} (forwards, deletes, or hides mail):",
+                        f"Invoke-Remediation -Description 'Disable suspicious inbox rules: {user}' -Command {{",
+                        f"    $rules = Get-InboxRule -Mailbox '{user}' | Where-Object {{",
+                        f"        $_.ForwardTo -or $_.ForwardAsAttachmentTo -or $_.RedirectTo -or",
+                        f"        $_.DeleteMessage -or $_.PermanentDelete -or",
+                        f"        ($_.MoveToFolder -and $_.MoveToFolder -in @('DeletedItems', 'JunkEmail', 'RSS Feeds', 'RSS Subscriptions'))",
+                        f"    }}",
+                        f"    if ($rules) {{",
+                        f"        $rules | ForEach-Object {{",
+                        f"            Write-Host \"  Disabling: $($_.Name)\" -ForegroundColor Yellow",
+                        f"            Disable-InboxRule -Mailbox '{user}' -Identity $_.Identity -Confirm:$false",
+                        f"        }}",
+                        f"        Write-Host \"  $($rules.Count) rule(s) disabled. Run Remove-InboxRule after review to permanently delete.\" -ForegroundColor Cyan",
+                        f"    }} else {{",
+                        f"        Write-Host '  No suspicious rules found.' -ForegroundColor Green",
+                        f"    }}",
+                        "}",
                     ]
 
             elif rule == "oauth_phishing_pattern":

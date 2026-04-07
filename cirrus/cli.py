@@ -739,6 +739,29 @@ def _maybe_run_analysis(
     from cirrus.workflows.base import _run_correlation
     _run_correlation(case.case_dir, result, case, sensitivity=sensitivity)
 
+    if interactive:
+        ps_path = case.case_dir / "remediation_commands.ps1"
+        if ps_path.exists():
+            try:
+                if "Invoke-Remediation" in ps_path.read_text(encoding="utf-8"):
+                    console.print()
+                    if Confirm.ask(
+                        "[bold]Open remediation script in editor?[/bold]",
+                        default=False,
+                    ):
+                        import os as _os, subprocess as _sp, sys as _sys
+                        try:
+                            if _sys.platform == "win32":
+                                _os.startfile(str(ps_path))
+                            elif _sys.platform == "darwin":
+                                _sp.run(["open", str(ps_path)], check=False)
+                            else:
+                                _sp.run(["xdg-open", str(ps_path)], check=False)
+                        except Exception as open_err:
+                            console.print(f"[dim]Could not open editor: {open_err}[/dim]")
+            except Exception:
+                pass
+
 
 # ---------------------------------------------------------------------------
 # run commands

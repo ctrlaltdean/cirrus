@@ -384,6 +384,19 @@ def _run_correlation(
         except Exception as exc:
             console.print(f"[dim]Excel workbook skipped: {exc}[/dim]")
 
+        # Remediation script — only surface it when there are actionable findings
+        ps_path = case_dir / "remediation_commands.ps1"
+        if ps_path.exists():
+            try:
+                if "Invoke-Remediation" in ps_path.read_text(encoding="utf-8"):
+                    console.print(
+                        f"[bold]Remediation:[/bold] [cyan]{ps_path}[/cyan]\n"
+                        f"  [dim]Connect-ExchangeOnline + Connect-MgGraph first. "
+                        f"Set $DryRun = $false to execute.[/dim]\n"
+                    )
+            except Exception:
+                pass
+
     except Exception as exc:
         console.print(f"\n[dim]Correlation skipped: {exc}[/dim]")
 
