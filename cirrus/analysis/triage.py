@@ -209,7 +209,12 @@ def _check_sign_ins(
         records = _collect_all(session, f"{GRAPH_BASE}/auditLogs/signIns", params)
         records.sort(key=lambda r: r.get("createdDateTime") or "", reverse=True)
     except PermissionError as exc:
-        return CheckResult(label, "skipped", f"403 from Graph — {exc}"), []
+        detail = str(exc)
+        if "NonPremium" in detail or "premium" in detail.lower():
+            msg = "Entra ID P1 license required for /auditLogs/signIns — tenant does not have a premium license"
+        else:
+            msg = f"AuditLog.Read.All required — {detail}"
+        return CheckResult(label, "skipped", msg), []
     except Exception as exc:
         return CheckResult(label, "error", str(exc)[:120]), []
 

@@ -210,7 +210,7 @@ def _hunt_signin_anomalies(
             },
         )
     except PermissionError:
-        return [], "signin_anomalies: AuditLog.Read.All required (no P1 needed)"
+        return [], "signin_anomalies: Entra ID P1 required for /auditLogs/signIns"
     except Exception as exc:
         return [], f"signin_anomalies: {str(exc)[:120]}"
 
@@ -473,7 +473,7 @@ def _hunt_password_spray(
             },
         )
     except PermissionError:
-        return [], "password_spray: AuditLog.Read.All required (no P1 needed)"
+        return [], "password_spray: Entra ID P1 required for /auditLogs/signIns"
     except Exception as exc:
         return [], f"password_spray: {str(exc)[:120]}"
 
