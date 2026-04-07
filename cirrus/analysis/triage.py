@@ -382,9 +382,10 @@ def _run_inbox_analysis(rules: list[dict]) -> tuple[CheckResult, list[dict]]:
     Pure analysis of a list of inbox rule dicts (Graph or normalized PS format).
     Extracted so it can be called by both the live check and the PS fallback.
 
-    Each rule is annotated with its own _iocFlags.  If any rule is suspicious,
-    ALL rules are returned so the analyst can manually review subject/keyword
-    conditions that generic checks do not catch.  Clean accounts return nothing.
+    Each rule is annotated with its own _iocFlags.  ALL rules are returned
+    whenever any exist so the analyst can review them.  "Clean" is only returned
+    when zero inbox rules are configured.  Unflagged rules return "warn" because
+    they require manual review — attacker rules don't always match known patterns.
     """
     label = "Inbox rules"
     if not rules:
@@ -452,15 +453,22 @@ def _run_inbox_analysis(rules: list[dict]) -> tuple[CheckResult, list[dict]]:
     summary = f"{len(rules)} rule(s)"
     if suspicious:
         summary += f" — {'; '.join(suspicious[:3])}"
+    elif rules:
+        summary += " — no auto-flagged patterns, review manually"
 
-    # If any rule is suspicious, return ALL rules so the analyst can manually
-    # review every condition — attackers often plant additional subject/keyword
-    # rules alongside the obvious forwarding rule that our checks don't flag.
-    # Clean accounts return nothing (no noise in the output).
-    records = rules if any_flagged else []
+    # Return ALL rules whenever any exist so the analyst can review them.
+    # "Clean" only applies when zero inbox rules are configured.
+    # If no specific IOC flags fired, still return "warn" — the analyst must
+    # manually inspect rules that do not match known suspicious patterns.
+    if check_flags:
+        status = _flag_status(check_flags)
+    elif rules:
+        status = "warn"
+    else:
+        status = "clean"
 
-    return CheckResult(label, _flag_status(check_flags) if check_flags else "clean", summary,
-                       list(dict.fromkeys(check_flags)), check_flags), records
+    return CheckResult(label, status, summary,
+                       list(dict.fromkeys(check_flags)), check_flags), rules
 
 
 def _run_forwarding_analysis(upn: str, settings: dict) -> tuple[CheckResult, list[dict]]:
