@@ -231,6 +231,9 @@ class SPSignInLogsCollector(GraphCollector):
         params: dict[str, Any] = {
             "$filter": " and ".join(filters),
             "$top": 999,
+            # /auditLogs/servicePrincipalSignIns requires $count=true when
+            # the session carries ConsistencyLevel: eventual (base.py).
+            "$count": "true",
         }
 
         records = self._collect_all(

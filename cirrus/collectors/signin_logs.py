@@ -306,6 +306,10 @@ class SignInLogsCollector(GraphCollector):
         params: dict[str, Any] = {
             "$filter": " and ".join(filters),
             "$top": 999,
+            # /auditLogs/signIns requires $count=true whenever the session
+            # carries ConsistencyLevel: eventual (set globally in base.py).
+            # Without it the endpoint returns 400 with no error detail.
+            "$count": "true",
         }
 
         records = self._collect_all(f"{GRAPH_BASE}/auditLogs/signIns", params)
