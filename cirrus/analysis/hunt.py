@@ -132,7 +132,11 @@ def _get(session: requests.Session, url: str, params: dict | None = None) -> dic
     if resp.status_code == 404:
         raise FileNotFoundError(f"404 Not Found: {url}")
     if resp.status_code in (400, 501):
-        raise ValueError(f"HTTP {resp.status_code}: {url}")
+        try:
+            detail = resp.json().get("error", {}).get("message", "") or resp.text[:300]
+        except Exception:
+            detail = resp.text[:300]
+        raise ValueError(f"HTTP {resp.status_code}: {url}" + (f" — {detail}" if detail else ""))
     resp.raise_for_status()
     return resp.json()
 

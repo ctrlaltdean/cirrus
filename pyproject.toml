@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cirrus"
-version = "0.4.54"
+version = "0.4.55"
 description = "Cloud Incident Response & Reconnaissance Utility Suite"
 readme = "README.md"
 requires-python = ">=3.11"

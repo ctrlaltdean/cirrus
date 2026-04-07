@@ -26,6 +26,7 @@ from cirrus import __version__
 GITHUB_OWNER = "ctrlaltdean"
 GITHUB_REPO  = "cirrus"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+TAGS_API     = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/tags"
 
 # Asset names published by the GitHub Actions build workflow
 _PLATFORM_ASSET: dict[str, str] = {
@@ -63,14 +64,18 @@ def check_for_update(timeout: int = 10) -> UpdateInfo:
     system     = platform.system()
     asset_name = _PLATFORM_ASSET.get(system)
 
+    # ── Step 1: find the latest version via the tags API ─────────────────────
+    # We use tags (not /releases/latest) because we push version tags directly
+    # without always creating a GitHub Release object.
     try:
-        resp = requests.get(
-            RELEASES_API,
+        tags_resp = requests.get(
+            TAGS_API,
             timeout=timeout,
             headers={"Accept": "application/vnd.github+json"},
+            params={"per_page": 20},
         )
-        resp.raise_for_status()
-        data = resp.json()
+        tags_resp.raise_for_status()
+        tags_data = tags_resp.json()
     except Exception as exc:
         return UpdateInfo(
             current_version=__version__,
@@ -80,15 +85,43 @@ def check_for_update(timeout: int = 10) -> UpdateInfo:
             error=str(exc),
         )
 
-    latest_tag   = data.get("tag_name", "").lstrip("v")
-    release_body = data.get("body", "").strip() or None
-    download_url = None
+    tag_versions = [
+        t.get("name", "").lstrip("v")
+        for t in tags_data
+        if t.get("name", "").startswith("v")
+    ]
+    try:
+        latest_tag = max(tag_versions, key=lambda v: tuple(int(x) for x in v.split(".")))
+    except (ValueError, TypeError):
+        latest_tag = ""
 
-    if asset_name:
-        for asset in data.get("assets", []):
-            if asset.get("name") == asset_name:
-                download_url = asset.get("browser_download_url")
-                break
+    if not latest_tag:
+        return UpdateInfo(
+            current_version=__version__,
+            latest_version="unknown",
+            update_available=False,
+            asset_name=asset_name,
+        )
+
+    # ── Step 2: try to fetch a matching release for asset download URL ────────
+    download_url  = None
+    release_notes = None
+    try:
+        rel_resp = requests.get(
+            f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tags/v{latest_tag}",
+            timeout=timeout,
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        if rel_resp.status_code == 200:
+            rel_data = rel_resp.json()
+            release_notes = rel_data.get("body", "").strip() or None
+            if asset_name:
+                for asset in rel_data.get("assets", []):
+                    if asset.get("name") == asset_name:
+                        download_url = asset.get("browser_download_url")
+                        break
+    except Exception:
+        pass  # no release object for this tag — version check still works
 
     return UpdateInfo(
         current_version  = __version__,
@@ -96,7 +129,7 @@ def check_for_update(timeout: int = 10) -> UpdateInfo:
         update_available = _is_newer(latest_tag, __version__),
         download_url     = download_url,
         asset_name       = asset_name,
-        release_notes    = release_body,
+        release_notes    = release_notes,
     )
 
 
