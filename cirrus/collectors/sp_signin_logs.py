@@ -231,14 +231,18 @@ class SPSignInLogsCollector(GraphCollector):
         params: dict[str, Any] = {
             "$filter": " and ".join(filters),
             "$top": 999,
-            # /auditLogs/servicePrincipalSignIns requires $count=true when
-            # the session carries ConsistencyLevel: eventual (base.py).
-            "$count": "true",
         }
 
-        records = self._collect_all(
-            f"{GRAPH_BASE}/auditLogs/servicePrincipalSignIns", params
-        )
+        # Strip ConsistencyLevel for this call — standard filters only,
+        # no advanced queries needed.  Sending it routes to the premium
+        # backend and returns 403 on non-P1 tenants.
+        self.session.headers.pop("ConsistencyLevel", None)
+        try:
+            records = self._collect_all(
+                f"{GRAPH_BASE}/auditLogs/servicePrincipalSignIns", params
+            )
+        finally:
+            self.session.headers["ConsistencyLevel"] = "eventual"
 
         # Per-record flagging
         for record in records:

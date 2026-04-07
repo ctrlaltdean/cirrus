@@ -197,22 +197,23 @@ def _hunt_signin_anomalies(
       - Impossible travel (consecutive sign-ins from different countries ≤ 2h)
     """
     try:
+        # Strip ConsistencyLevel — standard date filter needs no advanced
+        # queries; sending it routes to the premium backend (403 on non-P1).
+        session.headers.pop("ConsistencyLevel", None)
         records = _collect_all(
             session,
             f"{GRAPH_BASE}/auditLogs/signIns",
             params={
                 "$filter": f"createdDateTime ge {_odata_dt(start_dt)}",
                 "$top": "999",
-                "$count": "true",
-                # No $select — authenticationProtocol is not accepted by the
-                # v1.0 $select parser even though it exists on the resource.
-                # Fetching all fields keeps device-code detection working.
             },
         )
     except PermissionError:
-        return [], "signin_anomalies: Entra ID P1 required for /auditLogs/signIns"
+        return [], "signin_anomalies: AuditLog.Read.All required for /auditLogs/signIns"
     except Exception as exc:
         return [], f"signin_anomalies: {str(exc)[:120]}"
+    finally:
+        session.headers["ConsistencyLevel"] = "eventual"
 
     # Group by user
     by_user: dict[str, list[dict]] = defaultdict(list)
@@ -462,20 +463,22 @@ def _hunt_password_spray(
     Returns HuntTargets where `name` is the attacker IP address.
     """
     try:
+        session.headers.pop("ConsistencyLevel", None)
         records = _collect_all(
             session,
             f"{GRAPH_BASE}/auditLogs/signIns",
             params={
                 "$filter": f"createdDateTime ge {_odata_dt(start_dt)}",
                 "$top": "999",
-                "$count": "true",
                 "$select": "id,userPrincipalName,ipAddress,status,createdDateTime",
             },
         )
     except PermissionError:
-        return [], "password_spray: Entra ID P1 required for /auditLogs/signIns"
+        return [], "password_spray: AuditLog.Read.All required for /auditLogs/signIns"
     except Exception as exc:
         return [], f"password_spray: {str(exc)[:120]}"
+    finally:
+        session.headers["ConsistencyLevel"] = "eventual"
 
     # Per-IP stats
     ip_failures: dict[str, set[str]] = defaultdict(set)  # ip -> set of upns

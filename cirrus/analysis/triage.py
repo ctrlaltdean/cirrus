@@ -126,8 +126,13 @@ class TriageReport:
 
 # ── API helpers ────────────────────────────────────────────────────────────────
 
-def _get(session: requests.Session, url: str, params: dict | None = None) -> dict | list:
-    resp = session.get(url, params=params, timeout=30)
+def _get(
+    session: requests.Session,
+    url: str,
+    params: dict | None = None,
+    headers: dict | None = None,
+) -> dict | list:
+    resp = session.get(url, params=params, headers=headers, timeout=30)
     if resp.status_code == 403:
         try:
             err = resp.json().get("error", {})
@@ -145,13 +150,18 @@ def _get(session: requests.Session, url: str, params: dict | None = None) -> dic
     return resp.json()
 
 
-def _collect_all(session: requests.Session, url: str, params: dict | None = None) -> list[dict]:
+def _collect_all(
+    session: requests.Session,
+    url: str,
+    params: dict | None = None,
+    headers: dict | None = None,
+) -> list[dict]:
     """Follow @odata.nextLink to collect all pages."""
     results: list[dict] = []
     next_url: str | None = url
     p = params or {}
     while next_url:
-        data = _get(session, next_url, params=p if next_url == url else None)
+        data = _get(session, next_url, params=p if next_url == url else None, headers=headers)
         results.extend(data.get("value") or [])
         next_url = data.get("@odata.nextLink")
     return results
@@ -201,13 +211,16 @@ def _check_sign_ins(
                 f"createdDateTime ge {_odata_dt(start_dt)}"
             ),
             "$top": "50",
-            # $orderby omitted — combining it with ConsistencyLevel: eventual
-            # routes to Graph's advanced-query backend which returns 403 on
-            # tenants without P1.  Sort client-side instead.
-            "$count": "true",
+            "$orderby": "createdDateTime desc",
         }
-        records = _collect_all(session, f"{GRAPH_BASE}/auditLogs/signIns", params)
-        records.sort(key=lambda r: r.get("createdDateTime") or "", reverse=True)
+        # Strip ConsistencyLevel for this call — the standard equality filter
+        # doesn't need advanced queries, and sending ConsistencyLevel routes
+        # the request to Graph's premium backend which returns 403 on non-P1
+        # tenants even though basic sign-in log access doesn't require P1.
+        records = _collect_all(
+            session, f"{GRAPH_BASE}/auditLogs/signIns", params,
+            headers={"ConsistencyLevel": None},
+        )
     except PermissionError as exc:
         detail = str(exc)
         if "NonPremium" in detail or "premium" in detail.lower():

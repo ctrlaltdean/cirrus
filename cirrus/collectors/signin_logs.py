@@ -306,13 +306,18 @@ class SignInLogsCollector(GraphCollector):
         params: dict[str, Any] = {
             "$filter": " and ".join(filters),
             "$top": 999,
-            # /auditLogs/signIns requires $count=true whenever the session
-            # carries ConsistencyLevel: eventual (set globally in base.py).
-            # Without it the endpoint returns 400 with no error detail.
-            "$count": "true",
         }
 
-        records = self._collect_all(f"{GRAPH_BASE}/auditLogs/signIns", params)
+        # /auditLogs/signIns uses only standard equality/comparison filters
+        # — no advanced queries needed.  Sending ConsistencyLevel: eventual
+        # (set on the session for other endpoints) routes the request to
+        # Graph's premium backend and returns 403 on non-P1 tenants.
+        # Strip it for this call only.
+        self.session.headers.pop("ConsistencyLevel", None)
+        try:
+            records = self._collect_all(f"{GRAPH_BASE}/auditLogs/signIns", params)
+        finally:
+            self.session.headers["ConsistencyLevel"] = "eventual"
 
         # Per-record flagging
         for record in records:
