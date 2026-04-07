@@ -199,6 +199,7 @@ def _hunt_signin_anomalies(
             params={
                 "$filter": f"createdDateTime ge {_odata_dt(start_dt)}",
                 "$top": "999",
+                "$count": "true",
                 "$select": (
                     "id,createdDateTime,userPrincipalName,ipAddress,"
                     "authenticationProtocol,clientAppUsed,location,"
@@ -466,6 +467,7 @@ def _hunt_password_spray(
             params={
                 "$filter": f"createdDateTime ge {_odata_dt(start_dt)}",
                 "$top": "999",
+                "$count": "true",
                 "$select": "id,userPrincipalName,ipAddress,status,createdDateTime",
             },
         )
