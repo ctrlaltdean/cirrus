@@ -49,6 +49,7 @@ from cirrus import __version__
 from cirrus.auth.authenticator import (
     DEFAULT_CLIENT_ID,
     AuthenticationError,
+    check_token_scopes,
     get_token,
     get_token_silent,
     list_cached_tenants,
@@ -537,12 +538,33 @@ def _resolve_date_range(
 def auth_login(
     tenant: TenantOpt,
     client_id: ClientIdOpt = None,
+    force_refresh: bool = typer.Option(
+        False, "--force-refresh",
+        help="Force a new interactive login even if a cached token exists. "
+             "Use this after admin consent is granted in a tenant.",
+    ),
 ) -> None:
     """Authenticate to a Microsoft 365 tenant via interactive browser login."""
     _banner()
-    _authenticate(tenant, client_id)
+    if force_refresh:
+        logout(tenant, **({"client_id": client_id} if client_id else {}))
+    token, _ = _authenticate(tenant, client_id)
     console.print(f"[green]Credentials cached for[/green] [cyan]{tenant}[/cyan].")
-    console.print("[dim]Run `cirrus auth status` to see all cached tenants.[/dim]")
+
+    missing = check_token_scopes(token)
+    if missing:
+        console.print(
+            "\n[yellow]⚠  Warning — the following scopes are missing from your token:[/yellow]"
+        )
+        for s in missing:
+            console.print(f"  [dim]• {s}[/dim]")
+        console.print(
+            "[yellow]   These scopes require admin consent. Once a Global Admin has granted\n"
+            "   consent for the tenant, re-run:[/yellow]\n"
+            f"   [cyan]cirrus auth login --tenant {tenant} --force-refresh[/cyan]\n"
+        )
+    else:
+        console.print("[dim]Run `cirrus auth status` to see all cached tenants.[/dim]")
 
 
 @auth_app.command("logout")

@@ -105,8 +105,11 @@ class GraphCollector:
             if resp.status_code == 403:
                 raise CollectorError(
                     f"HTTP 403: Permission denied at {url}. "
-                    "Ensure the analyst account has the required roles "
-                    "(Global Reader, Security Reader, or equivalent)."
+                    "Common causes: (1) the required scope was not included in the token — "
+                    "this happens when the analyst authenticated before admin consent was granted; "
+                    "fix with `cirrus auth login --force-refresh`; "
+                    "(2) the analyst account is missing a required role "
+                    "(Global Reader + Security Reader covers most collectors)."
                 )
 
             if resp.status_code == 404:

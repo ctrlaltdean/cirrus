@@ -25,6 +25,7 @@ GRAPH_SCOPES = [
     "https://graph.microsoft.com/Directory.Read.All",
     "https://graph.microsoft.com/Policy.Read.All",
     "https://graph.microsoft.com/MailboxSettings.Read",
+    "https://graph.microsoft.com/Calendars.Read",
     "https://graph.microsoft.com/User.Read.All",
     "https://graph.microsoft.com/IdentityRiskyUser.Read.All",
     "https://graph.microsoft.com/IdentityRiskEvent.Read.All",
@@ -35,6 +36,21 @@ GRAPH_SCOPES = [
     "https://graph.microsoft.com/Reports.Read.All",
     "https://graph.microsoft.com/RoleManagement.Read.Directory",
 ]
+
+# Scopes that require admin consent and are commonly missing when the analyst
+# authenticated before admin consent was granted. Used by check_token_scopes()
+# to produce actionable warnings rather than silent 403s later.
+_ADMIN_CONSENT_SCOPES = frozenset({
+    "AuditLog.Read.All",
+    "AuditLogsQuery.Read.All",
+    "IdentityRiskyUser.Read.All",
+    "IdentityRiskEvent.Read.All",
+    "UserAuthenticationMethod.Read.All",
+    "Calendars.Read",
+    "MailboxSettings.Read",
+    "Reports.Read.All",
+    "RoleManagement.Read.Directory",
+})
 
 # Exchange Online scope — used to obtain a token for Connect-ExchangeOnline
 # -AccessToken so the EXO PowerShell session reuses the existing MSAL auth
@@ -65,6 +81,36 @@ def _build_app(tenant_id: str, client_id: str, cache: msal.SerializableTokenCach
         authority=authority,
         token_cache=cache,
     )
+
+
+def check_token_scopes(access_token: str) -> list[str]:
+    """
+    Decode the JWT access token and return a list of admin-consent scopes that
+    are present in GRAPH_SCOPES but absent from the token's scp claim.
+
+    This catches the common case where the analyst authenticated before admin
+    consent was granted — the token is valid but silently missing scopes, which
+    only surfaces as a 403 when the affected collector runs.
+
+    Returns a list of missing scope short-names (e.g. ["AuditLog.Read.All"]).
+    Returns an empty list if all required admin-consent scopes are present or
+    if the token cannot be decoded.
+    """
+    import base64
+    import json as _json
+
+    try:
+        # JWT is header.payload.signature — decode the payload only
+        payload_b64 = access_token.split(".")[1]
+        # Pad to a multiple of 4 for standard base64
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        return []  # can't decode — don't block the flow
+
+    # scp is space-separated for delegated tokens; roles is a list for app tokens
+    granted = set((payload.get("scp") or "").split())
+    return sorted(_ADMIN_CONSENT_SCOPES - granted)
 
 
 def get_token(tenant_id: str, client_id: str = DEFAULT_CLIENT_ID, force_refresh: bool = False) -> str:
