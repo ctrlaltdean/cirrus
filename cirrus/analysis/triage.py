@@ -201,14 +201,15 @@ def _check_sign_ins(
                 f"createdDateTime ge {_odata_dt(start_dt)}"
             ),
             "$top": "50",
-            "$orderby": "createdDateTime desc",
-            # $count=true required alongside ConsistencyLevel: eventual (session header);
-            # /auditLogs/signIns returns 403 without it.
+            # $orderby omitted — combining it with ConsistencyLevel: eventual
+            # routes to Graph's advanced-query backend which returns 403 on
+            # tenants without P1.  Sort client-side instead.
             "$count": "true",
         }
         records = _collect_all(session, f"{GRAPH_BASE}/auditLogs/signIns", params)
-    except PermissionError:
-        return CheckResult(label, "skipped", "Requires AuditLog.Read.All — re-authenticate if recently granted"), []
+        records.sort(key=lambda r: r.get("createdDateTime") or "", reverse=True)
+    except PermissionError as exc:
+        return CheckResult(label, "skipped", f"403 from Graph — {exc}"), []
     except Exception as exc:
         return CheckResult(label, "error", str(exc)[:120]), []
 
