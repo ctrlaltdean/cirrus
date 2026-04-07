@@ -204,12 +204,9 @@ def _hunt_signin_anomalies(
                 "$filter": f"createdDateTime ge {_odata_dt(start_dt)}",
                 "$top": "999",
                 "$count": "true",
-                "$select": (
-                    "id,createdDateTime,userPrincipalName,ipAddress,"
-                    "authenticationProtocol,clientAppUsed,location,"
-                    "riskLevelAggregated,riskLevelDuringSignIn,riskState,"
-                    "status"
-                ),
+                # No $select — authenticationProtocol is not accepted by the
+                # v1.0 $select parser even though it exists on the resource.
+                # Fetching all fields keeps device-code detection working.
             },
         )
     except PermissionError:
