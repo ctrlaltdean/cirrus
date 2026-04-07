@@ -202,10 +202,13 @@ def _check_sign_ins(
             ),
             "$top": "50",
             "$orderby": "createdDateTime desc",
+            # $count=true required alongside ConsistencyLevel: eventual (session header);
+            # /auditLogs/signIns returns 403 without it.
+            "$count": "true",
         }
         records = _collect_all(session, f"{GRAPH_BASE}/auditLogs/signIns", params)
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires Entra ID P1 / AuditLog.Read.All"), []
+        return CheckResult(label, "skipped", "Requires AuditLog.Read.All — re-authenticate if recently granted"), []
     except Exception as exc:
         return CheckResult(label, "error", str(exc)[:120]), []
 
@@ -640,7 +643,7 @@ def _check_audit_activity(
         }
         records = _collect_all(session, f"{GRAPH_BASE}/auditLogs/directoryAudits", params)
     except PermissionError:
-        return CheckResult(label, "skipped", "Requires AuditLog.Read.All / Entra ID P1"), []
+        return CheckResult(label, "skipped", "Requires AuditLog.Read.All — re-authenticate if recently granted"), []
     except Exception:
         # Some tenants don't support the targetResources filter — try without
         try:
