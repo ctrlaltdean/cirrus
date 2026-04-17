@@ -32,6 +32,7 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
   - [Domain Enrichment](#domain-enrichment)
   - [Blast Radius](#blast-radius)
   - [Threat Hunt](#threat-hunt)
+  - [Email Security Scan](#email-security-scan)
   - [Compliance Audit](#compliance-audit)
   - [Investigation Workflows](#investigation-workflows)
     - [BEC — Business Email Compromise](#bec--business-email-compromise)
@@ -71,6 +72,7 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 | **Cross-Collector Correlation** | Post-collection engine links events across collectors to surface multi-source attack patterns including hosting-provider sign-ins; 15 detection rules; tunable with `--sensitivity low/medium/high` |
 | **HTML Investigation Report** | Single self-contained HTML report with correlation findings, SVG swim-lane timeline chart, IOC event list, per-user timeline, IP enrichment tab, and per-collector tables |
 | **Remediation Script** | Auto-generated `remediation_commands.ps1` per case — ready-to-run PowerShell to remove inbox rules, revoke OAuth grants, block accounts, and revoke sessions based on correlation findings |
+| **Email Security Scan** | Three-tier email security posture assessment: Tier 1 passive DNS (SPF/DMARC/DKIM/MX), Tier 2 unauthenticated SMTP probing (RejectDirectSend, null-sender, STARTTLS), Tier 3 authenticated Exchange Online audit (DKIM signing, anti-phish hardening, connector trust, transport rule scope). Export to CSV or JSON. |
 | **CIS Compliance Audit** | 34 checks against CIS M365 & Entra ID Benchmarks with wizard UI |
 | **License-Aware Collection** | Detects tenant license tier (P1/P2/E5) and gracefully skips unsupported endpoints |
 | **Multi-Tenant** | Authenticate to and collect from multiple client tenants independently |
@@ -242,6 +244,9 @@ CIRRUS uses **delegated permissions** — the signed-in account must hold the ro
 | `cirrus run full` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
 | `cirrus run sp` | Global Reader + Security Reader |
 | `cirrus run audit` | Global Reader + Security Reader (+ Exchange Administrator for PowerShell checks) |
+| `cirrus scan dns` | None — DNS queries only |
+| `cirrus scan smtp` | None — unauthenticated TCP probe (written authorization required) |
+| `cirrus scan tenant` | Exchange Administrator (active `Connect-ExchangeOnline` session required) |
 
 ¹ Required for inbox rules and mail forwarding checks. Without this role those collectors are skipped — all other collectors continue normally. See [Exchange Recipient Administrator](#exchange-recipient-administrator-inbox-rules--mail-forwarding) below.
 
@@ -645,6 +650,151 @@ No case folder is created — use `cirrus triage` or a workflow command to colle
 
 ---
 
+### Email Security Scan
+
+Assesses email authentication posture across three independent tiers. Each tier can be run individually or combined into a single unified report via `cirrus scan report`.
+
+**Severity levels:** `CRITICAL` / `HIGH` / `MEDIUM` / `INFO`
+
+All findings include a `Remediation` field with specific actionable commands (PowerShell or DNS). CRITICAL and HIGH findings are expanded in the console output. Results export to CSV or JSON for deliverables.
+
+---
+
+#### Tier 1 — Passive DNS Checks
+
+No authentication, no connections — only DNS queries. Safe to run against any domain without authorization.
+
+| Check | What it evaluates |
+|---|---|
+| **SPF** | Missing record (CRITICAL), `+all` (CRITICAL), `~all`/`?all` enforcement (HIGH), DNS lookup count vs RFC 7208 10-hop limit, risky shared-infrastructure includes (SendGrid, Microsoft EOP, Amazon SES, Mailgun, SparkPost) |
+| **DMARC** | Missing record (CRITICAL), `p=none` monitoring-only (CRITICAL), `p=quarantine` partial enforcement (MEDIUM), `aspf=r`/`adkim=r` alignment (MEDIUM), `rua=` aggregate reporting presence |
+| **DKIM** | 17-selector enumeration, M365 `selector1`/`selector2` CNAME structure check, RSA key-size estimation, no-selectors-found (HIGH) |
+| **MX** | M365 fingerprinting (extracts direct-send endpoint for Tier 2), SEG detection (Proofpoint, Mimecast, Barracuda, Sophos, Broadcom) |
+
+```bash
+# Single domain
+cirrus scan dns --domain contoso.com
+
+# Multiple domains
+cirrus scan dns --domain contoso.com --domain fabrikam.com
+
+# Export to CSV
+cirrus scan dns --domain contoso.com --export-path spf_dmarc_findings.csv
+
+# Export to JSON
+cirrus scan dns --domain contoso.com --export-path findings.json
+```
+
+---
+
+#### Tier 2 — SMTP Probing
+
+Makes outbound TCP connections to the tenant MX on port 25. **Requires explicit written authorization from the domain/tenant owner.** CIRRUS will not proceed without an explicit `--confirm` flag or interactive confirmation.
+
+| Probe | What it tests |
+|---|---|
+| **RejectDirectSend** | Issues `MAIL FROM:<spoofed-internal@domain>` — if accepted (250), direct send is open (CRITICAL). RSET/QUIT cleanly; no DATA, no message body sent. |
+| **Null sender** | Issues `MAIL FROM:<>` — if accepted and `RCPT TO:<internal>` also succeeds, NDR/bounce spoofing to internal mailboxes is possible (HIGH). |
+| **STARTTLS** | Verifies STARTTLS is advertised in the EHLO response (MEDIUM if absent). |
+
+Raw SMTP transcript is preserved as an `INFO` finding for IR evidence purposes.
+
+```bash
+# With --confirm flag (scripted/authorized)
+cirrus scan smtp \
+  --tenant-mx contoso-com.mail.protection.outlook.com \
+  --test-recipient jsmith@contoso.com \
+  --spoofed-from ceo@contoso.com \
+  --confirm
+
+# Without --confirm — CIRRUS prompts interactively
+cirrus scan smtp \
+  --tenant-mx contoso-com.mail.protection.outlook.com \
+  --test-recipient jsmith@contoso.com \
+  --spoofed-from ceo@contoso.com
+```
+
+---
+
+#### Tier 3 — Authenticated Tenant Audit
+
+Requires an active Exchange Online PowerShell session. Run `Connect-ExchangeOnline` in a PowerShell window before invoking this command — CIRRUS uses the existing session and will **not** prompt for credentials or establish a connection automatically.
+
+| Check | What it audits |
+|---|---|
+| **RejectDirectSend** | `Get-OrganizationConfig RejectDirectSend` — CRITICAL if `$false` |
+| **DKIM signing** | `Get-DkimSigningConfig` for all domains — HIGH if disabled or invalid status; MEDIUM if key < 2048-bit |
+| **Anti-phish policy** | `HonorDmarcPolicy`, `EnableSpoofIntelligence`, `EnableUnauthenticatedSender`, `AuthenticationFailAction`, `DmarcRejectAction` per policy |
+| **Safe sender bypasses** | `AllowedSenderDomains` cross-referenced against `Get-AcceptedDomain` — CRITICAL if any internal domain appears (complete auth bypass) |
+| **Transport rules** | `SetScl=-1` rules with `SenderDomainIs` matching accepted domains without `InOrganization` scope restriction |
+| **Inbound connectors** | `TreatMessagesAsInternal=$true` (CRITICAL), no `SenderIPAddresses` restriction (HIGH), Partner connector IP scope review |
+| **Accepted domain coverage** | Each accepted domain cross-referenced against active DKIM configs — HIGH if any accepted domain lacks DKIM signing |
+
+```bash
+# PowerShell (run first — one-time per session)
+Connect-ExchangeOnline -UserPrincipalName admin@contoso.com
+
+# Then in CIRRUS
+cirrus scan tenant --domain contoso.com
+
+# Export findings
+cirrus scan tenant --domain contoso.com --export-path tenant_audit.csv
+```
+
+---
+
+#### Combined Report
+
+Run all three tiers in a single pass and produce a unified report. Tier 2 and Tier 3 are opt-in via their respective flags.
+
+```bash
+# DNS only (Tier 1)
+cirrus scan report --domain contoso.com
+
+# DNS + SMTP probe (Tiers 1 + 2)
+cirrus scan report --domain contoso.com \
+  --tenant-mx contoso-com.mail.protection.outlook.com \
+  --test-recipient jsmith@contoso.com \
+  --spoofed-from ceo@contoso.com \
+  --smtp-confirm
+
+# All three tiers — full posture assessment
+cirrus scan report --domain contoso.com \
+  --tenant-mx contoso-com.mail.protection.outlook.com \
+  --test-recipient jsmith@contoso.com \
+  --spoofed-from ceo@contoso.com \
+  --smtp-confirm \
+  --tenant-domain contoso.com \
+  --export-path scan_contoso.csv
+```
+
+**Sample output:**
+
+```
+Sev        Domain            Category   Finding
+──────────────────────────────────────────────────────────────────────
+✖ CRITICAL  contoso.com       dmarc      DMARC p=none: monitoring only, no enforcement
+✖ CRITICAL  contoso.com       smtp       RejectDirectSend NOT enabled — MX accepted spoofed MAIL FROM
+✖ CRITICAL  contoso.com       tenant     Internal domain 'contoso.com' in AllowedSenderDomains
+▲ HIGH      contoso.com       dkim       No DKIM selectors found for contoso.com
+▲ HIGH      contoso.com       tenant     DKIM signing disabled: fabrikam.com
+▲ HIGH      contoso.com       tenant     Transport rule 'Internal Trust': SCL=-1 bypass for mail claiming internal domain
+● MEDIUM    contoso.com       spf        SPF ~all (SoftFail): enforcement not active
+● MEDIUM    contoso.com       dmarc      DMARC aspf=relaxed: subdomain spoofing passes SPF alignment
+○ INFO      contoso.com       mx         MX: Microsoft 365 Exchange Online Protection
+
+Actionable findings:
+  ✖ [contoso.com] DMARC p=none: monitoring only, no enforcement
+    Authentication failures are only logged — no mail is quarantined or rejected.
+    Fix: Publish _dmarc.contoso.com 'v=DMARC1; p=quarantine; rua=mailto:dmarc@contoso.com'
+
+╭─ Scan Summary ───────────────────────────────────────╮
+│  3 CRITICAL  2 HIGH  2 MEDIUM  3 INFO  across 1 domain │
+╰───────────────────────────────────────────────────────╯
+```
+
+---
+
 ### Investigation Workflows
 
 All workflow runs produce a timestamped case folder with JSON, CSV, and NDJSON output per collector, a chain-of-custody audit log, cross-collector correlation findings, and a self-contained HTML investigation report.
@@ -1018,7 +1168,7 @@ cirrus deps install
 
 | Dependency | Purpose | Required? |
 |------------|---------|-----------|
-| `ExchangeOnlineManagement` | Automates Exchange, DKIM, UAL, and logging checks | Optional |
+| `ExchangeOnlineManagement` | Automates Exchange, DKIM, UAL, and logging checks; required for `cirrus scan tenant` | Optional |
 | `MicrosoftTeams` | Automates Teams external access, guest, and meeting checks | Optional |
 | `Microsoft.Online.SharePoint.PowerShell` | Automates SharePoint sharing and legacy auth checks | Optional |
 | `dnspython` | DNS-based DMARC / SPF checks | Optional |
