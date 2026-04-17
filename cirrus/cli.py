@@ -87,11 +87,13 @@ auth_app = typer.Typer(help="Manage authentication and cached credentials.", no_
 run_app = typer.Typer(help="Run investigation workflows.", no_args_is_help=True)
 case_app = typer.Typer(help="Manage investigation cases.", no_args_is_help=True)
 deps_app = typer.Typer(help="Check and install optional dependencies.", no_args_is_help=True)
+scan_app = typer.Typer(help="Email security posture scanning (DNS/SMTP/Tenant).", no_args_is_help=True)
 
 app.add_typer(auth_app, name="auth")
 app.add_typer(run_app, name="run")
 app.add_typer(case_app, name="case")
 app.add_typer(deps_app, name="deps")
+app.add_typer(scan_app, name="scan")
 
 console = Console()
 
@@ -2976,6 +2978,363 @@ def update(
 def version() -> None:
     """Show CIRRUS version."""
     console.print(f"CIRRUS v{__version__}")
+
+
+# ---------------------------------------------------------------------------
+# cirrus scan — Email security posture scanning
+# ---------------------------------------------------------------------------
+
+_SEVERITY_STYLE: dict[str, str] = {
+    "critical": "bold red",
+    "high": "red",
+    "medium": "yellow",
+    "info": "dim",
+}
+
+_SEVERITY_ICON: dict[str, str] = {
+    "critical": "✖",
+    "high": "▲",
+    "medium": "●",
+    "info": "○",
+}
+
+
+def _render_scan_report(report: "ScanReport") -> None:
+    """Print a scan report to the console, grouped by severity."""
+    from rich.table import Table
+    from rich.panel import Panel
+
+    if not report.findings:
+        console.print("[green]No findings.[/green]")
+    else:
+        table = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
+        table.add_column("Sev", width=8)
+        table.add_column("Domain", width=28)
+        table.add_column("Category", width=10)
+        table.add_column("Finding")
+
+        for finding in report.sorted_findings:
+            sev = finding.severity
+            style = _SEVERITY_STYLE.get(sev, "")
+            icon = _SEVERITY_ICON.get(sev, "·")
+            table.add_row(
+                f"[{style}]{icon} {sev.upper()}[/{style}]",
+                finding.domain,
+                finding.category,
+                finding.finding[:90],
+            )
+        console.print(table)
+
+    # Detail block for CRITICAL and HIGH
+    actionable = [f for f in report.sorted_findings if f.severity in ("critical", "high")]
+    if actionable:
+        console.print()
+        console.print("[bold]Actionable findings:[/bold]")
+        for finding in actionable:
+            sev = finding.severity
+            style = _SEVERITY_STYLE.get(sev, "")
+            console.print(f"\n  [{style}]{_SEVERITY_ICON[sev]} [{finding.domain}] {finding.finding}[/{style}]")
+            console.print(f"    [dim]{finding.detail[:300]}[/dim]")
+            if finding.remediation:
+                console.print(f"    [cyan]Fix:[/cyan] {finding.remediation[:300]}")
+
+    # Summary
+    crit = report.critical_count
+    high = report.high_count
+    med = sum(1 for f in report.findings if f.severity == "medium")
+    info = sum(1 for f in report.findings if f.severity == "info")
+    panel_style = "red" if crit else ("yellow" if high else "green")
+    summary = (
+        f"[bold red]{crit} CRITICAL[/bold red]  "
+        f"[red]{high} HIGH[/red]  "
+        f"[yellow]{med} MEDIUM[/yellow]  "
+        f"[dim]{info} INFO[/dim]  "
+        f"across {len(report.domains)} domain(s)"
+    )
+    console.print()
+    console.print(Panel(summary, title="[bold]Scan Summary[/bold]", border_style=panel_style))
+
+    if report.errors:
+        console.print()
+        for err in report.errors:
+            console.print(f"[yellow]⚠[/yellow] [dim]{err}[/dim]")
+
+
+def _export_scan_report(report: "ScanReport", export_path: "Path") -> None:
+    """Write report to CSV or JSON based on file extension."""
+    import csv
+
+    records = report.to_records()
+    suffix = export_path.suffix.lower()
+
+    if suffix == ".json":
+        export_path.write_text(
+            json.dumps(records, indent=2, default=str), encoding="utf-8"
+        )
+        console.print(f"[dim]JSON report written → {export_path}[/dim]")
+    else:
+        if not records:
+            export_path.write_text("", encoding="utf-8")
+        else:
+            with export_path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=list(records[0].keys()))
+                writer.writeheader()
+                writer.writerows(records)
+        console.print(f"[dim]CSV report written → {export_path}[/dim]")
+
+
+# Import ScanReport type for annotations only (avoids circular issues)
+try:
+    from cirrus.analysis.scan import ScanReport
+except ImportError:
+    ScanReport = None  # type: ignore[assignment, misc]
+
+
+@scan_app.command("dns")
+def scan_dns(
+    domains: Annotated[
+        list[str],
+        typer.Option("--domain", "-d", help="Domain to scan (repeat for multiple)"),
+    ],
+    export_path: Annotated[
+        Optional[Path],
+        typer.Option("--export-path", help="Export findings to CSV (.csv) or JSON (.json)"),
+    ] = None,
+) -> None:
+    """
+    Tier 1: Passive DNS checks — SPF, DMARC, DKIM, MX fingerprinting.
+
+    No authentication required. Makes only DNS queries.
+
+    Examples:
+      cirrus scan dns --domain contoso.com
+      cirrus scan dns --domain contoso.com --domain fabrikam.com --export-path findings.csv
+    """
+    import json as _json
+    from cirrus.analysis.scan import run_dns_scan
+
+    _banner()
+    console.print(f"[bold]DNS scan[/bold] | {len(domains)} domain(s): {', '.join(domains)}")
+    console.print()
+
+    with console.status("[dim]Running DNS checks...[/dim]"):
+        report = run_dns_scan(domains)
+
+    _render_scan_report(report)
+
+    if export_path:
+        _export_scan_report(report, export_path)
+
+
+@scan_app.command("smtp")
+def scan_smtp(
+    tenant_mx: Annotated[
+        str,
+        typer.Option("--tenant-mx", help="Target MX hostname (e.g. contoso-com.mail.protection.outlook.com)"),
+    ],
+    test_recipient: Annotated[
+        str,
+        typer.Option("--test-recipient", help="Known-valid internal mailbox to use as RCPT TO"),
+    ],
+    spoofed_from: Annotated[
+        str,
+        typer.Option("--spoofed-from", help="Internal address to use as spoofed MAIL FROM (e.g. ceo@contoso.com)"),
+    ],
+    confirm: Annotated[
+        bool,
+        typer.Option("--confirm/--no-confirm", help="Confirm you have written authorization to probe this target"),
+    ] = False,
+    port: Annotated[int, typer.Option("--port", help="SMTP port (default 25)")] = 25,
+    export_path: Annotated[
+        Optional[Path],
+        typer.Option("--export-path", help="Export findings to CSV or JSON"),
+    ] = None,
+) -> None:
+    """
+    Tier 2: Unauthenticated SMTP probing of tenant MX endpoint (port 25).
+
+    Tests: RejectDirectSend enforcement, null sender acceptance, STARTTLS.
+
+    IMPORTANT: Makes outbound TCP connections to the target MX on port 25.
+    You MUST have written authorization from the domain/tenant owner.
+    Pass --confirm to acknowledge authorization before any connection is made.
+
+    Examples:
+      cirrus scan smtp --tenant-mx contoso-com.mail.protection.outlook.com \\
+        --test-recipient jsmith@contoso.com --spoofed-from ceo@contoso.com --confirm
+    """
+    from cirrus.analysis.scan import run_smtp_scan
+    from rich.prompt import Confirm
+
+    _banner()
+
+    if not confirm:
+        console.print(
+            "[bold yellow]⚠  Authorization required[/bold yellow]\n\n"
+            "  Tier 2 SMTP probing makes TCP connections to the target MX on port 25.\n"
+            "  This must only be performed with explicit written authorization from the\n"
+            f"  owner of [bold]{tenant_mx}[/bold].\n"
+        )
+        confirm = Confirm.ask("  I confirm I have written authorization to probe this target")
+        if not confirm:
+            console.print("[dim]Aborted.[/dim]")
+            raise typer.Exit(1)
+
+    console.print(
+        f"[bold]SMTP probe[/bold] | target: {tenant_mx} | "
+        f"spoofed-from: {spoofed_from} | rcpt: {test_recipient}"
+    )
+    console.print()
+
+    with console.status(f"[dim]Probing {tenant_mx}:{port}...[/dim]"):
+        report = run_smtp_scan(
+            tenant_mx=tenant_mx,
+            test_recipient=test_recipient,
+            spoofed_from=spoofed_from,
+            port=port,
+            confirmed=True,
+        )
+
+    _render_scan_report(report)
+
+    if export_path:
+        _export_scan_report(report, export_path)
+
+
+@scan_app.command("tenant")
+def scan_tenant(
+    domain: Annotated[
+        str,
+        typer.Option("--domain", "-d", help="Primary domain of the tenant to audit"),
+    ],
+    export_path: Annotated[
+        Optional[Path],
+        typer.Option("--export-path", help="Export findings to CSV or JSON"),
+    ] = None,
+) -> None:
+    """
+    Tier 3: Authenticated Exchange Online tenant audit.
+
+    Checks: RejectDirectSend, DKIM signing, anti-phish policy hardening,
+    safe sender bypasses, dangerous transport rules, inbound connectors,
+    and accepted domain DKIM coverage.
+
+    Requires an active Exchange Online session. Run Connect-ExchangeOnline
+    in a PowerShell window before invoking this command — CIRRUS will use
+    the existing session and will NOT prompt for credentials.
+
+    Example:
+      cirrus scan tenant --domain contoso.com
+    """
+    from cirrus.analysis.scan import run_tenant_scan
+
+    _banner()
+    console.print(f"[bold]Tenant audit[/bold] | domain: {domain}")
+    console.print(
+        "[dim]  Requires active Exchange Online session "
+        "(Connect-ExchangeOnline already run).[/dim]\n"
+    )
+
+    with console.status("[dim]Running Exchange Online audit...[/dim]"):
+        report = run_tenant_scan(domain)
+
+    _render_scan_report(report)
+
+    if export_path:
+        _export_scan_report(report, export_path)
+
+
+@scan_app.command("report")
+def scan_report(
+    domains: Annotated[
+        list[str],
+        typer.Option("--domain", "-d", help="Domain to scan (repeat for multiple)"),
+    ],
+    tenant_mx: Annotated[
+        Optional[str],
+        typer.Option("--tenant-mx", help="Include Tier 2 SMTP probe against this MX hostname"),
+    ] = None,
+    test_recipient: Annotated[
+        Optional[str],
+        typer.Option("--test-recipient", help="RCPT TO target for SMTP probe"),
+    ] = None,
+    spoofed_from: Annotated[
+        Optional[str],
+        typer.Option("--spoofed-from", help="MAIL FROM address for SMTP probe"),
+    ] = None,
+    smtp_confirm: Annotated[
+        bool,
+        typer.Option("--smtp-confirm/--no-smtp-confirm", help="Confirm SMTP probe authorization"),
+    ] = False,
+    tenant_domain: Annotated[
+        Optional[str],
+        typer.Option("--tenant-domain", help="Include Tier 3 tenant audit for this domain"),
+    ] = None,
+    export_path: Annotated[
+        Optional[Path],
+        typer.Option("--export-path", help="Export aggregated findings to CSV or JSON"),
+    ] = None,
+) -> None:
+    """
+    Combined scan: run all requested tiers and produce a unified report.
+
+    Tier 1 (DNS) always runs for all --domain arguments.
+    Tier 2 (SMTP) runs if --tenant-mx, --test-recipient, and --spoofed-from are all provided.
+    Tier 3 (Tenant) runs if --tenant-domain is provided (requires active EXO session).
+
+    Example (all three tiers):
+      cirrus scan report --domain contoso.com \\
+        --tenant-mx contoso-com.mail.protection.outlook.com \\
+        --test-recipient jsmith@contoso.com --spoofed-from ceo@contoso.com --smtp-confirm \\
+        --tenant-domain contoso.com --export-path scan_contoso.csv
+    """
+    from cirrus.analysis.scan import run_full_scan
+    from rich.prompt import Confirm
+
+    _banner()
+
+    run_smtp = bool(tenant_mx and test_recipient and spoofed_from)
+    run_tenant_flag = bool(tenant_domain)
+
+    # SMTP authorization gate
+    if run_smtp and not smtp_confirm:
+        console.print(
+            "[bold yellow]⚠  SMTP probe authorization required[/bold yellow]\n\n"
+            f"  Tier 2 probe will connect to [bold]{tenant_mx}[/bold] on port 25.\n"
+            "  This requires explicit written authorization from the domain owner.\n"
+        )
+        smtp_confirm = Confirm.ask("  I confirm I have written authorization to probe this target")
+        if not smtp_confirm:
+            console.print("[dim]SMTP probe skipped — continuing with other tiers.[/dim]")
+            run_smtp = False
+
+    tiers = ["DNS"]
+    if run_smtp:
+        tiers.append("SMTP")
+    if run_tenant_flag:
+        tiers.append("Tenant")
+
+    console.print(
+        f"[bold]Full scan[/bold] | tiers: {', '.join(tiers)} | "
+        f"domains: {', '.join(domains)}"
+    )
+    console.print()
+
+    with console.status(f"[dim]Running {', '.join(tiers)} checks...[/dim]"):
+        report = run_full_scan(
+            domains=domains,
+            tenant_mx=tenant_mx if run_smtp else None,
+            test_recipient=test_recipient if run_smtp else None,
+            spoofed_from=spoofed_from if run_smtp else None,
+            smtp_confirmed=smtp_confirm,
+            run_tenant=run_tenant_flag,
+            tenant_domain=tenant_domain,
+        )
+
+    _render_scan_report(report)
+
+    if export_path:
+        _export_scan_report(report, export_path)
 
 
 # ---------------------------------------------------------------------------
