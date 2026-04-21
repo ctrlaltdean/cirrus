@@ -182,11 +182,11 @@ class TestPIMActivationsCollector:
         assert len(records) == 1
         assert any(f.startswith("PIM_ACTIVATION:") for f in records[0]["_iocFlags"])
 
-    def test_collect_requires_p1(self):
+    def test_collect_requires_p2(self):
         from cirrus.collectors.base import CollectorError
         collector = self._make_collector()
         collector.license_profile.allows.return_value = False
-        with pytest.raises(CollectorError, match="P1"):
+        with pytest.raises(CollectorError, match="P2"):
             collector.collect(days=30)
 
     def test_user_filter_applied(self):
