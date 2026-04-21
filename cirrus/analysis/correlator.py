@@ -102,14 +102,9 @@ _SENSITIVITY_THRESHOLDS: dict[str, tuple[int, int, int]] = {
     "high":   (3,   5,  20),  # SMB / small tenant — catch low-volume attacks
 }
 
-# Suspicious sign-in flag prefixes that trigger persistence checks
-_SUSPICIOUS_SIGNIN_PREFIXES = (
-    "SUSPICIOUS_AUTH_PROTOCOL:",
-    "IMPOSSIBLE_TRAVEL:",
-    "GEO_RISK:",
-    "RISK_STATE:atRisk",
-    "RISK_STATE:confirmedCompromised",
-    "IDENTITY_RISK:",
+from cirrus.utils.flags import (
+    SUSPICIOUS_SIGNIN_PREFIXES as _SUSPICIOUS_SIGNIN_PREFIXES,
+    PERSISTENCE_AUDIT_PREFIXES as _PERSISTENCE_AUDIT_PREFIXES_TUPLE,
 )
 
 
@@ -137,6 +132,8 @@ class Finding:
     recommendation: str
     ioc_flags: list[str] = field(default_factory=list)      # de-duplicated flags from evidence
     mitre_techniques: list[str] = field(default_factory=list)  # ATT&CK technique IDs
+    temporal_proximity: str = ""      # "minutes" | "hours" | "same_day" | "days" | ""
+    proximity_minutes: int | None = None  # actual gap in minutes between key events
 
 
 # ── MITRE ATT&CK technique mappings ───────────────────────────────────────────
@@ -219,6 +216,79 @@ def _parse_dt(ts: str) -> datetime:
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _closest_pair_gap(
+    records_a: list[dict], ts_key_a: str,
+    records_b: list[dict], ts_key_b: str,
+) -> tuple[int | None, str]:
+    """
+    Find the smallest time gap between any event in *records_a* and any event
+    in *records_b*.  Returns (gap_minutes, proximity_label).
+
+    proximity_label is one of: "minutes", "hours", "same_day", "days", or ""
+    if either list is empty or timestamps are unparseable.
+    """
+    if not records_a or not records_b:
+        return None, ""
+
+    times_a = [_parse_dt(r.get(ts_key_a) or "") for r in records_a]
+    times_b = [_parse_dt(r.get(ts_key_b) or "") for r in records_b]
+
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    times_a = [t for t in times_a if t != epoch]
+    times_b = [t for t in times_b if t != epoch]
+    if not times_a or not times_b:
+        return None, ""
+
+    min_gap = min(
+        abs((ta - tb).total_seconds())
+        for ta in times_a for tb in times_b
+    )
+    gap_minutes = int(min_gap / 60)
+    label = _proximity_label(gap_minutes)
+    return gap_minutes, label
+
+
+def _proximity_label(gap_minutes: int) -> str:
+    """Map a gap in minutes to a human-readable proximity bucket."""
+    if gap_minutes <= 60:
+        return "minutes"
+    if gap_minutes <= 360:  # 6 hours
+        return "hours"
+    if gap_minutes <= 1440:  # 24 hours
+        return "same_day"
+    return "days"
+
+
+def _proximity_severity_boost(base_severity: str, proximity: str) -> str:
+    """
+    Optionally boost severity when events are temporally close.
+
+    Rules:
+      - "minutes" proximity on a MEDIUM finding → promote to HIGH
+      - "hours"   proximity on a MEDIUM finding → promote to HIGH
+      - "days"    proximity on a HIGH finding   → no change (already high)
+    """
+    if base_severity == "medium" and proximity in ("minutes", "hours"):
+        return "high"
+    return base_severity
+
+
+def _proximity_note(proximity: str, gap_minutes: int | None) -> str:
+    """Return a human-readable note for inclusion in finding descriptions."""
+    if gap_minutes is None or not proximity:
+        return ""
+    if proximity == "minutes":
+        return f"Events occurred within {gap_minutes} minute(s) of each other — strong temporal correlation."
+    if proximity == "hours":
+        hrs = gap_minutes // 60
+        return f"Events occurred within ~{hrs} hour(s) of each other — moderate temporal correlation."
+    if proximity == "same_day":
+        return "Events occurred within the same 24-hour window."
+    # "days"
+    days = gap_minutes // 1440
+    return f"Events occurred ~{days} day(s) apart within the collection window."
 
 
 def _flags(record: dict) -> list[str]:
@@ -355,6 +425,25 @@ class CorrelationEngine:
             except Exception:
                 pass  # Never let a broken rule crash the whole workflow
 
+        # ── Custom YAML rules ─────────────────────────────────────────────
+        try:
+            from cirrus.analysis.custom_rules import load_custom_rules, run_custom_rules
+            custom_paths = [
+                self.case_dir / "custom_rules.yaml",
+                self.case_dir / "custom_rules.yml",
+                Path.home() / ".cirrus" / "custom_rules.yaml",
+            ]
+            for cp in custom_paths:
+                custom_rules = load_custom_rules(cp)
+                if custom_rules:
+                    custom_findings = run_custom_rules(custom_rules, self._data)
+                    for f in custom_findings:
+                        f.id = _next_id()
+                        f.ioc_flags = _dedup_flags(f.evidence)
+                    findings.extend(custom_findings)
+        except Exception:
+            pass  # custom rules are optional — never block built-in rules
+
         counts = {"high": 0, "medium": 0, "low": 0}
         affected_users: set[str] = set()
         for f in findings:
@@ -467,6 +556,15 @@ class CorrelationEngine:
                 evidence.append(_evidence(r, coll, ts_key,
                     f"New {coll.replace('_', ' ')}: {r.get('_methodType') or r.get('displayName') or ''}"))
 
+            # Temporal proximity: compare suspicious sign-ins to persistence events
+            persist_records = [r for _, r in persistence]
+            persist_ts_key = "createdDateTime"  # MFA methods use createdDateTime
+            gap_min, prox = _closest_pair_gap(
+                by_user_suspicious[upn], "createdDateTime",
+                persist_records, persist_ts_key,
+            )
+            prox_note = _proximity_note(prox, gap_min)
+
             findings.append(Finding(
                 id="",
                 rule="suspicious_signin_then_persistence",
@@ -478,6 +576,7 @@ class CorrelationEngine:
                     f"({'; '.join(suspicious_summaries[:3])}) and a new "
                     f"{persist_type} was registered during the same collection window. "
                     "This pattern is consistent with account takeover followed by attacker persistence."
+                    + (f" {prox_note}" if prox_note else "")
                 ),
                 evidence=evidence,
                 recommendation=(
@@ -485,6 +584,8 @@ class CorrelationEngine:
                     "If unauthorized: disable the account, remove the new MFA method or device, "
                     "revoke all active sessions (revokeSignInSessions), and reset credentials."
                 ),
+                temporal_proximity=prox,
+                proximity_minutes=gap_min,
             ))
 
         return findings
@@ -528,6 +629,12 @@ class CorrelationEngine:
                 evidence.append(_evidence(r, "mfa_methods", "createdDateTime",
                     f"New MFA method registered: {method_type}"))
 
+            gap_min, prox = _closest_pair_gap(
+                by_target_reset[upn], "activityDateTime",
+                mfa_added, "createdDateTime",
+            )
+            prox_note = _proximity_note(prox, gap_min)
+
             findings.append(Finding(
                 id="",
                 rule="password_reset_then_mfa_registered",
@@ -539,6 +646,7 @@ class CorrelationEngine:
                     f"({', '.join(r.get('_methodType', '') for r in mfa_added[:3])}) was registered "
                     "during the same collection window. Attackers routinely reset a victim's password "
                     "to lock them out, then register their own MFA method for persistent access."
+                    + (f" {prox_note}" if prox_note else "")
                 ),
                 evidence=evidence,
                 recommendation=(
@@ -547,6 +655,8 @@ class CorrelationEngine:
                     "reset the account password again, revoke all sessions, and audit the admin account "
                     "that performed the reset."
                 ),
+                temporal_proximity=prox,
+                proximity_minutes=gap_min,
             ))
 
         return findings
@@ -605,10 +715,16 @@ class CorrelationEngine:
                 evidence.append(_evidence(r, "audit_logs", "activityDateTime",
                     f"Privilege escalation: {r.get('activityDisplayName', '')} — {', '.join(roles_assigned[:2])}"))
 
+            gap_min, prox = _closest_pair_gap(
+                user_signins, "createdDateTime",
+                role_events, "activityDateTime",
+            )
+            prox_note = _proximity_note(prox, gap_min)
+
             findings.append(Finding(
                 id="",
                 rule="privilege_escalation_after_signin",
-                severity="high",
+                severity=_proximity_severity_boost("high", prox),
                 title="Suspicious sign-in activity during privilege escalation window",
                 user=upn,
                 description=(
@@ -616,6 +732,7 @@ class CorrelationEngine:
                     f"({'; '.join(roles_assigned[:3])}) during the same collection window. "
                     "Attackers who gain access often assign themselves admin roles before performing "
                     "further actions or establishing persistence."
+                    + (f" {prox_note}" if prox_note else "")
                 ),
                 evidence=evidence,
                 recommendation=(
@@ -623,6 +740,8 @@ class CorrelationEngine:
                     "disable the account, revoke all sessions, and audit all actions taken "
                     "using the elevated privileges (check audit logs for actions after the role assignment)."
                 ),
+                temporal_proximity=prox,
+                proximity_minutes=gap_min,
             ))
 
         return findings
@@ -911,6 +1030,12 @@ class CorrelationEngine:
                 evidence.append(_evidence(r, "registered_devices", "registrationDateTime",
                     f"New device registered: {dev_name}"))
 
+            gap_min, prox = _closest_pair_gap(
+                by_user_dc[upn], "createdDateTime",
+                devices, "registrationDateTime",
+            )
+            prox_note = _proximity_note(prox, gap_min)
+
             findings.append(Finding(
                 id="",
                 rule="device_code_then_device_registered",
@@ -923,6 +1048,7 @@ class CorrelationEngine:
                     "the same collection window. Device code phishing followed by device "
                     "registration grants the attacker a Primary Refresh Token that survives "
                     "password resets."
+                    + (f" {prox_note}" if prox_note else "")
                 ),
                 evidence=evidence,
                 recommendation=(
@@ -931,6 +1057,8 @@ class CorrelationEngine:
                     "and verify the device code sign-in was not user-initiated (check with the user). "
                     "Block legacy auth and device code flows via Conditional Access if not already done."
                 ),
+                temporal_proximity=prox,
+                proximity_minutes=gap_min,
             ))
 
         return findings
@@ -1096,10 +1224,6 @@ class CorrelationEngine:
             return []
 
         _ESCALATION_WINDOW = 86400  # 24 h in seconds
-        _PERSISTENCE_AUDIT_PREFIXES = (
-            "RECENTLY_ADDED",
-            "HIGH_PRIV_ROLE_ASSIGNED",
-        )
 
         findings: list[Finding] = []
 
@@ -1115,7 +1239,7 @@ class CorrelationEngine:
                 target = (r.get("_targetUser") or "").lower()
                 if target != upn:
                     continue
-                if not _has_flag_prefix(r, *_PERSISTENCE_AUDIT_PREFIXES):
+                if not _has_flag_prefix(r, *_PERSISTENCE_AUDIT_PREFIXES_TUPLE):
                     continue
                 ev_dt = _parse_dt(r.get("activityDateTime") or "")
                 if ev_dt == datetime.min.replace(tzinfo=timezone.utc):
@@ -1168,6 +1292,23 @@ class CorrelationEngine:
             if not escalation_evidence:
                 continue
 
+            # Compute proximity from spray success to first escalation event
+            esc_timestamps = [e.timestamp for e in escalation_evidence if e.timestamp]
+            gap_min = None
+            prox = ""
+            if esc_timestamps:
+                success_ts = success_rec.get("createdDateTime") or ""
+                if success_ts:
+                    gaps = []
+                    for ets in esc_timestamps:
+                        dt_e = _parse_dt(ets)
+                        if dt_e != datetime.min.replace(tzinfo=timezone.utc):
+                            gaps.append(abs((dt_e - success_dt).total_seconds()) / 60)
+                    if gaps:
+                        gap_min = int(min(gaps))
+                        prox = _proximity_label(gap_min)
+            prox_note = _proximity_note(prox, gap_min)
+
             spray_ip_list = ", ".join(list(spray_ips)[:4])
             findings.append(Finding(
                 id="",
@@ -1182,6 +1323,7 @@ class CorrelationEngine:
                     "on that account: new MFA methods, device registrations, role assignments, "
                     "or high-risk OAuth grants. This pattern is consistent with an attacker "
                     "consolidating access immediately after spray-based initial compromise."
+                    + (f" {prox_note}" if prox_note else "")
                 ),
                 evidence=[
                     _evidence(
@@ -1198,6 +1340,8 @@ class CorrelationEngine:
                     "Enrich the spray source IP(s) via cirrus enrich to assess infrastructure. "
                     "Check whether other accounts targeted by the spray also show post-access activity."
                 ),
+                temporal_proximity=prox,
+                proximity_minutes=gap_min,
             ))
 
         return findings
@@ -1368,10 +1512,16 @@ class CorrelationEngine:
                 evidence.append(_evidence(r, "signin_logs", "createdDateTime",
                     f"Sign-in from {country or 'unknown'}"))
 
+            gap_min, prox = _closest_pair_gap(
+                [user_rec] if user_rec else [], "createdDateTime",
+                signins, "createdDateTime",
+            )
+            prox_note = _proximity_note(prox, gap_min)
+
             findings.append(Finding(
                 id="",
                 rule="new_account_with_signin",
-                severity="medium",
+                severity=_proximity_severity_boost("medium", prox),
                 title="Recently created account with active sign-in activity",
                 user=upn,
                 description=(
@@ -1379,6 +1529,7 @@ class CorrelationEngine:
                     f"{len(signins)} sign-in event(s) in the collection window. "
                     "Attackers create backdoor accounts that authenticate quickly after creation. "
                     "Verify this account was created through authorized provisioning processes."
+                    + (f" {prox_note}" if prox_note else "")
                 ),
                 evidence=evidence,
                 recommendation=(
@@ -1386,6 +1537,8 @@ class CorrelationEngine:
                     "and who initiated it). If unauthorized: disable immediately, revoke all sessions, "
                     "and audit what the account accessed."
                 ),
+                temporal_proximity=prox,
+                proximity_minutes=gap_min,
             ))
 
         return findings
@@ -1660,6 +1813,12 @@ class CorrelationEngine:
                     f"Suspicious sign-in: {', '.join(susp_flags[:3])}",
                 ))
 
+            gap_min, prox = _closest_pair_gap(
+                susp_signins, "createdDateTime",
+                pim_recs, "activityDateTime",
+            )
+            prox_note = _proximity_note(prox, gap_min)
+
             findings.append(Finding(
                 id="",
                 rule="pim_activation_after_suspicious_signin",
@@ -1672,6 +1831,7 @@ class CorrelationEngine:
                     "This pattern is consistent with an attacker who compromised the account, "
                     "signed in using an evasion technique, then self-activated a PIM role "
                     "to gain elevated privileges for subsequent administrative actions."
+                    + (f" {prox_note}" if prox_note else "")
                 ),
                 evidence=evidence,
                 recommendation=(
@@ -1681,6 +1841,8 @@ class CorrelationEngine:
                     "If suspicious: revoke all sessions, reset credentials, remove any new MFA "
                     "methods or OAuth grants, and review all PIM eligible assignments for this account."
                 ),
+                temporal_proximity=prox,
+                proximity_minutes=gap_min,
             ))
 
         return findings
@@ -2037,6 +2199,13 @@ def _write_text_report(report: dict[str, Any], findings: list[Finding], path: Pa
                     flag_str += f"  ... (+{len(f.ioc_flags) - 6} more)"
                 lines += _wrap(f"Flags: {flag_str}", 76, "  ") + [""]
 
+            # Temporal proximity
+            if f.temporal_proximity:
+                prox_display = _proximity_note(f.temporal_proximity, f.proximity_minutes)
+                if prox_display:
+                    lines.append(f"  Temporal proximity: {prox_display}")
+                    lines.append("")
+
             # MITRE ATT&CK techniques
             if f.mitre_techniques:
                 lines.append(f"  MITRE ATT&CK: {' · '.join(f.mitre_techniques)}")
@@ -2071,6 +2240,11 @@ def _wrap(text: str, width: int, indent: str) -> list[str]:
 def _finding_to_dict(f: Finding) -> dict:
     d = asdict(f)
     d["evidence"] = [asdict(e) for e in f.evidence]
+    # Only include proximity fields when populated
+    if not d.get("temporal_proximity"):
+        d.pop("temporal_proximity", None)
+    if d.get("proximity_minutes") is None:
+        d.pop("proximity_minutes", None)
     return d
 
 

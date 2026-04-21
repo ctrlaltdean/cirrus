@@ -26,6 +26,8 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
   - [Minimum roles by workflow](#minimum-roles-by-workflow)
   - [Provisioning a dedicated investigation account](#provisioning-a-dedicated-investigation-account)
 - [Commands](#commands)
+  - [Interactive Main Menu](#interactive-main-menu)
+  - [Full Investigation](#full-investigation)
   - [Authentication](#authentication)
   - [Quick Triage](#quick-triage)
   - [IP Enrichment](#ip-enrichment)
@@ -65,11 +67,15 @@ CIRRUS is a command-line tool for investigating security incidents and auditing 
 | **Blast Radius** | Map a compromised account's full access footprint — directory roles, groups, app roles, owned objects, OAuth grants, and recent sign-in apps — in parallel |
 | **BEC Workflow** | Targeted 10-step collection for Business Email Compromise investigations |
 | **ATO Workflow** | 11-step Account Takeover investigation — authentication layer, persistence, and exfiltration |
-| **BEC+ATO Workflow** | Combined 13-step full attack chain — most BEC incidents begin with an ATO event |
+| **Full Investigation** | End-to-end guided investigation for one or more users — triage + blast radius + BEC+ATO collection + correlation in a single command; supports `--user`, `--users`, `--users-file` |
+| **BEC+ATO Workflow** | Combined 16-step full attack chain — most BEC incidents begin with an ATO event; includes SP sign-in logs and PIM activations |
 | **Full Tenant Sweep** | Complete collection across all supported data sources |
 | **SP Compromise Workflow** | Targeted 7-step collection for OAuth phishing and service principal compromise — covers SP inventory, OAuth grants, SP sign-in logs, app registrations, consent events, and UAL app-token activity |
 | **Mailbox Delegation** | Calendar delegate and shared mailbox enumeration — surfaces attacker-added delegates that survive password resets |
-| **Cross-Collector Correlation** | Post-collection engine links events across collectors to surface multi-source attack patterns including hosting-provider sign-ins; 15 detection rules; tunable with `--sensitivity low/medium/high` |
+| **Cross-Collector Correlation** | Post-collection engine links events across collectors to surface multi-source attack patterns including hosting-provider sign-ins; 15 built-in detection rules with temporal proximity scoring; tunable with `--sensitivity low/medium/high`; extensible via YAML custom rules |
+| **Parallel Collector Execution** | Workflow steps run in parallel groups — independent collectors execute concurrently via thread pool while dependent steps (e.g. UAL) run after prerequisites complete |
+| **Collector Checkpointing** | Each completed collector is checkpointed to `.collector_checkpoint.json`; interrupted runs resume from the last completed step instead of re-collecting everything |
+| **Interactive Guided Menus** | Run `cirrus` with no arguments for a guided main menu; `cirrus run` with no subcommand shows a workflow picker; every command supports an interactive wizard mode |
 | **HTML Investigation Report** | Single self-contained HTML report with correlation findings, SVG swim-lane timeline chart, IOC event list, per-user timeline, IP enrichment tab, and per-collector tables |
 | **Remediation Script** | Auto-generated `remediation_commands.ps1` per case — ready-to-run PowerShell to remove inbox rules, revoke OAuth grants, block accounts, and revoke sessions based on correlation findings |
 | **Email Security Scan** | Three-tier email security posture assessment: Tier 1 passive DNS (SPF/DMARC/DKIM/MX), Tier 2 unauthenticated SMTP probing (RejectDirectSend, null-sender, STARTTLS), Tier 3 authenticated Exchange Online audit (DKIM signing, anti-phish hardening, connector trust, transport rule scope). Export to CSV or JSON. |
@@ -110,10 +116,18 @@ cirrus enrich  investigations/CONTOSO_20260317_143022   # IP enrichment
 cirrus run bec-ato --tenant contoso.com --existing-case investigations/CONTOSO_20260317_143022
 ```
 
-**Interactive wizard (no flags needed — CIRRUS prompts for everything):**
+**Full investigation — triage + blast radius + BEC+ATO + correlation in one pass:**
 ```bash
-cirrus triage
-cirrus run bec
+cirrus investigate --tenant contoso.com --user john@contoso.com
+cirrus investigate --tenant contoso.com --users-file suspects.txt   # multiple users
+```
+
+**Interactive guided menu (no flags needed — CIRRUS prompts for everything):**
+```bash
+cirrus              # main menu — choose investigate, triage, run, hunt, blast-radius, or analyze
+cirrus triage       # triage wizard
+cirrus run          # workflow picker (BEC, ATO, BEC+ATO, Full, SP)
+cirrus run bec      # BEC wizard
 ```
 
 After a workflow run, CIRRUS automatically runs the cross-collector correlation engine and generates `investigation_report.html` — a self-contained report you can open in any browser or share with a client.
@@ -237,6 +251,7 @@ CIRRUS uses **delegated permissions** — the signed-in account must hold the ro
 
 | Workflow | Minimum roles required |
 |---|---|
+| `cirrus investigate` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
 | `cirrus triage` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
 | `cirrus run bec` | Global Reader + Security Reader + Exchange Recipient Administrator ¹ |
 | `cirrus run ato` | Global Reader + Security Reader |
@@ -331,6 +346,57 @@ cirrus auth cleanup --tenant contoso.com
 ---
 
 ## Commands
+
+### Interactive Main Menu
+
+Run `cirrus` with no arguments to launch a guided menu that walks you through every available action:
+
+```bash
+cirrus
+```
+
+```
+╭─ CIRRUS — What would you like to do? ─────────────────────────────────────╮
+│                                                                            │
+│  1  Full Investigation   Triage + Blast Radius + BEC+ATO + Correlation     │
+│  2  Quick Triage         8 parallel checks on a suspected compromised acct │
+│  3  Collection Workflows Choose BEC, ATO, BEC+ATO, Full, or SP workflow    │
+│  4  Threat Hunt          Tenant-wide proactive hunt — no starting account  │
+│  5  Blast Radius         Map all access dimensions of a compromised acct   │
+│  6  Re-Analyze Case      Re-run correlation on an existing case folder     │
+│                                                                            │
+╰────────────────────────────────────────────────────────────────────────────╯
+```
+
+Similarly, `cirrus run` with no subcommand shows a workflow picker (BEC, ATO, BEC+ATO, Full, SP).
+
+---
+
+### Full Investigation
+
+Runs a complete end-to-end investigation for one or more users: triage, blast radius, BEC+ATO collection, and cross-collector correlation — all in a single command. Each user is triaged and blast-radius scanned individually, then a single BEC+ATO workflow collects evidence for all users into one case folder.
+
+```bash
+# Single user
+cirrus investigate --tenant contoso.com --user john@contoso.com
+
+# Multiple users
+cirrus investigate --tenant contoso.com \
+  --users john@contoso.com --users jane@contoso.com
+
+# From a file (one UPN per line, # comments ignored)
+cirrus investigate --tenant contoso.com --users-file suspects.txt
+
+# Custom lookback window (default 30 days)
+cirrus investigate --tenant contoso.com --user john@contoso.com --days 60
+
+# Interactive wizard — prompts for tenant, users, and window
+cirrus investigate
+```
+
+**Hunt → Investigate pipeline:** When `cirrus hunt` finds HIGH-severity targets, it offers to automatically launch `cirrus investigate` on those users — no manual re-entry required.
+
+---
 
 ### Authentication
 
@@ -646,7 +712,7 @@ cirrus hunt
 └──────────┴────────┴────────────────────────────────┴─────────┴─────────────────────────────────────┘
 ```
 
-No case folder is created — use `cirrus triage` or a workflow command to collect evidence on flagged accounts.
+After displaying results, if any HIGH-severity targets are found CIRRUS offers to launch a full investigation (`cirrus investigate`) on those users automatically — no manual re-entry required.
 
 ---
 
@@ -887,12 +953,14 @@ cirrus run ato --tenant contoso.com --all-users --days 14
 
 #### BEC+ATO — Combined Full Attack Chain
 
-Most BEC incidents begin with an ATO event. This workflow combines both investigations into a single run — shared collectors (sign-in logs, audit logs, UAL) run exactly once with no duplication.
+Most BEC incidents begin with an ATO event. This workflow combines both investigations into a single 16-step run — shared collectors (sign-in logs, audit logs, UAL) run exactly once with no duplication. Independent collectors execute in parallel for faster completion.
 
 **Covers:**
 - **ATO phase** — initial access, persistence (devices, MFA, OAuth, app registrations)
 - **BEC phase** — mailbox manipulation (rules, forwarding, wire fraud enablement)
 - **Overlap** — sign-in logs, audit events, and UAL cover both phases
+- **SP sign-in logs** — application authentication timeline for the target user's consented apps
+- **PIM activations** — Privileged Identity Management role activation history
 
 ```bash
 cirrus run bec-ato --tenant contoso.com --user john@contoso.com --days 30
@@ -908,7 +976,7 @@ cirrus run bec-ato --tenant contoso.com \
 
 Sweeps the entire tenant for all supported artifact types. Use when the compromised account is not yet identified, or for proactive threat hunting.
 
-**Collects everything in BEC+ATO, plus:** Service Principals.
+**Collects everything in BEC+ATO, plus:** Service Principals. All independent collectors run in parallel groups for faster execution.
 
 ```bash
 # Full sweep, all users, 90-day window
@@ -977,7 +1045,9 @@ cirrus run sp --tenant contoso.com \
 | Mail forwarding | ✓ ¹ | ✓ | | ✓ | ✓ | |
 | UAL | | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Service principals | | | | | ✓ | ✓ |
-| SP sign-in logs | | | | | | ✓ |
+| SP sign-in logs | | | | ✓ | | ✓ |
+| PIM activations | | | | ✓ | ✓ | |
+| Mailbox delegation | | | | ✓ | ✓ | |
 | Case folder / files | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Correlation + HTML report | optional ² | optional | optional | optional | optional | optional |
 
@@ -1192,10 +1262,11 @@ investigations/
     ├── case_audit.jsonl                ← tamper-evident chain-of-custody log
     ├── case_audit.txt                  ← human-readable audit log
     ├── triage_report.json              ← structured triage findings (triage runs only)
-    ├── ioc_correlation.json            ← cross-collector findings (machine-readable)
+    ├── ioc_correlation.json            ← cross-collector findings with temporal proximity (machine-readable)
     ├── ioc_correlation.txt             ← formatted correlation report
     ├── investigation_report.html       ← self-contained HTML investigation report
     ├── analysis.xlsx                   ← all triage + collection CSVs in one workbook
+    ├── .collector_checkpoint.json      ← resume checkpoint (auto-deleted on completion)
     │
     ├── triage/                         ← quick-triage check outputs
     │   ├── sign_ins.csv
@@ -1223,8 +1294,10 @@ investigations/
         ├── mail_forwarding.csv
         ├── oauth_grants.csv
         ├── conditional_access_policies.csv  ← P1 license required
-        ├── sp_signin_logs.csv          ← P1 license required
-        ├── service_principals.csv      ← full workflow only
+        ├── sp_signin_logs.csv          ← P1 license required; BEC+ATO and SP workflows
+        ├── pim_activations.csv        ← BEC+ATO and Full workflows
+        ├── mailbox_delegation.csv     ← BEC+ATO and Full workflows
+        ├── service_principals.csv      ← Full and SP workflows
         ├── unified_audit_log.csv
         └── json/                       ← SIEM / tool-format files
             ├── signin_logs.json / .ndjson
@@ -1262,6 +1335,8 @@ UAL records are normalized to match native `Search-UnifiedAuditLog` field names 
 ## IOC Flags
 
 Collectors annotate each record with a `_iocFlags` list. Records with flags should be reviewed first. The `_iocFlags` field appears in JSON, CSV, and NDJSON output.
+
+All flag names are defined in a shared registry (`cirrus/utils/flags.py`). Collectors and the correlation engine import from this registry rather than hard-coding strings, so typos are caught at import time and flag names stay consistent across the entire codebase.
 
 ### Sign-In Logs
 
@@ -1398,6 +1473,35 @@ Collectors annotate each record with a `_iocFlags` list. Records with flags shou
 | `LOCALHOST_REPLY_URL:<url>` | App has a localhost redirect URI |
 | `DISABLED_WITH_CREDENTIALS` | Disabled service principal still has active credentials |
 
+### SP Sign-In Logs
+
+| Flag | Meaning |
+|------|---------|
+| `FAILED_SP_AUTH` | Service principal authentication attempt failed |
+| `CLIENT_SECRET_CREDENTIAL` | Authentication used a client secret (vs certificate) |
+| `CERTIFICATE_CREDENTIAL` | Authentication used a certificate credential |
+| `SENSITIVE_RESOURCE:<resource>` | SP accessed a sensitive resource (Exchange, SharePoint, Graph) |
+| `MANAGED_IDENTITY` | Authentication from a managed identity |
+
+### PIM Activations
+
+| Flag | Meaning |
+|------|---------|
+| `PIM_ACTIVATION:<role>` | PIM role activated |
+| `HIGH_PRIV_PIM_ACTIVATION:<role>` | High-privilege PIM role activated (Global Admin, Exchange Admin, etc.) |
+| `JUSTIFICATION_MISSING` | Activation without a justification — policy may not require it |
+| `ACTIVATION_OUTSIDE_HOURS:<hour>` | Activation outside normal business hours (before 6 AM or after 10 PM UTC) |
+| `SELF_ACTIVATION` | User activated a role for themselves |
+| `APPROVAL_BYPASSED` | Activation did not go through an approval workflow |
+
+### Mailbox Delegation
+
+| Flag | Meaning |
+|------|---------|
+| `EXTERNAL_CALENDAR_DELEGATE:<upn>` | External user has calendar delegate access |
+| `EXTERNAL_DELEGATE_HIGH_PERMISSION:<upn>` | External delegate with Editor/Owner permission |
+| `INTERNAL_DELEGATE_HIGH_PERMISSION:<upn>` | Internal delegate with elevated permission |
+
 ---
 
 ## Cross-Collector Correlation
@@ -1430,8 +1534,50 @@ cirrus analyze investigations/CONTOSO_20260317_143022
 | `pim_activation_after_suspicious_signin` | **HIGH** | PIM high-privilege role activation for a user who also had a suspicious sign-in (device code, impossible travel, geo-risk) — attacker activates a dormant privileged role immediately after gaining access |
 | `ca_coverage_gap` | **MEDIUM** | Successful sign-in(s) where no Conditional Access policy was evaluated — user or auth flow falls entirely outside CA enforcement (T1078) |
 
+### Temporal Proximity Scoring
+
+Cross-collector correlation rules that link events from different data sources now compute the time gap between the closest matching event pair. Each finding includes a proximity label and the exact gap in minutes:
+
+| Proximity | Gap | Effect |
+|-----------|-----|--------|
+| `minutes` | < 60 min | Severity boosted one level (e.g. MEDIUM → HIGH) |
+| `hours` | 1–8 hours | No change |
+| `same_day` | 8–24 hours | No change |
+| `days` | > 24 hours | No change |
+
+Temporal proximity is shown in the correlation output and HTML report, helping analysts prioritize findings where attacker actions happened in rapid succession.
+
+### YAML Custom Correlation Rules
+
+Define your own cross-collector correlation rules in YAML without modifying Python code. Place a `custom_rules.yaml` file in the case directory or `~/.cirrus/`:
+
+```yaml
+rules:
+  - name: oauth_and_forwarding
+    title: "OAuth grant with mailbox forwarding"
+    severity: high
+    description: >
+      User has a high-risk OAuth grant AND external mail forwarding.
+    recommendation: "Revoke the OAuth grant and disable forwarding."
+    match:
+      - collector: oauth_grants
+        flag_prefix: "HIGH_RISK_SCOPE:"
+        user_key: "_sourceUser"
+      - collector: mail_forwarding
+        flag_prefix: "EXTERNAL_SMTP_FORWARD:"
+        user_key: "_sourceUser"
+```
+
+Rules match records across collectors by IOC flag prefix. Per-user rules (with `user_key`) fire when the same user appears in all match clauses. Global rules (no `user_key`) fire when all clauses have at least one matching record. Custom rule findings appear alongside built-in findings in all output formats.
+
+Search paths (first match wins):
+1. `<case_dir>/custom_rules.yaml` (or `.yml`)
+2. `~/.cirrus/custom_rules.yaml`
+
+### Output Files
+
 Three output files are written to the case folder:
-- `ioc_correlation.json` — machine-readable findings (suitable for SIEM ingestion)
+- `ioc_correlation.json` — machine-readable findings with temporal proximity data (SIEM-ingestible)
 - `ioc_correlation.txt` — formatted report for analyst review and case documentation
 - `investigation_report.html` — self-contained HTML report with correlation findings, SVG swim-lane timeline chart, IOC event list, per-user summary, per-collector flagged record tables, and optional IP/domain enrichment tabs
 
@@ -1485,6 +1631,16 @@ All 34 checks attempt automation first. Checks marked **Hybrid** use PowerShell 
 - [ ] Watch mode (`cirrus watch`) — recurring triage on a watchlist; useful for active retainers
 
 **Completed:**
+- [x] Full investigation command (`cirrus investigate`) — end-to-end triage + blast radius + BEC+ATO + correlation for one or more users in a single command; supports `--user`, `--users`, `--users-file` (v0.4.68)
+- [x] Interactive guided menus — `cirrus` with no args shows main menu; `cirrus run` with no subcommand shows workflow picker; every command supports wizard mode (v0.4.68)
+- [x] Hunt → investigate pipeline — `cirrus hunt` offers to auto-launch full investigation on HIGH-severity targets (v0.4.68)
+- [x] Parallel collector execution — independent workflow steps run concurrently in thread pool groups; dependent steps (UAL) wait for prerequisites (v0.4.68)
+- [x] Collector checkpointing — `.collector_checkpoint.json` enables resume after interruption; only uncompleted collectors re-run (v0.4.68)
+- [x] Temporal proximity scoring — cross-collector correlation findings include time gap between closest event pair; findings within 60 minutes are severity-boosted (v0.4.68)
+- [x] YAML custom correlation rules — define per-user or global rules in `custom_rules.yaml` without modifying Python code; loaded from case dir or `~/.cirrus/` (v0.4.68)
+- [x] Shared IOC flag registry — centralized flag constants in `cirrus/utils/flags.py`; collectors and correlator import from one source; typos caught at import time (v0.4.68)
+- [x] Auto blast-radius on HIGH findings — after correlation, if any HIGH finding is detected, blast-radius runs automatically on affected users (v0.4.68)
+- [x] SP sign-in logs + PIM activations added to BEC+ATO workflow — expanded from 13 to 16 collectors (v0.4.68)
 - [x] SP compromise workflow (`cirrus run sp`) — 7-step focused workflow for OAuth phishing and service principal compromise investigations; accepts optional `--app-id` to scope SP sign-in logs to a specific app (v0.4.45)
 - [x] `--sensitivity` flag — tune correlation rule thresholds for `low` (large enterprise, less noise), `medium` (default), or `high` (SMB, catch low-volume attacks); applies to password spray, spray-then-escalation, and mass mail access rules (v0.4.46)
 - [x] Consistent IOC flag naming — all collector `_iocFlags` now use `CATEGORY:DETAIL` format; brittle `startswith` prefix checks tightened with trailing colons to prevent false matches (v0.4.47)

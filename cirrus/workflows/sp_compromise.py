@@ -47,6 +47,9 @@ class SPCompromiseWorkflow(BaseWorkflow):
     name = "sp"
     description = "Service principal / OAuth app compromise investigation"
 
+    _G_PARALLEL = 0
+    _G_UAL = 1
+
     def _build_steps(
         self,
         users: list[str] | None,
@@ -55,22 +58,26 @@ class SPCompromiseWorkflow(BaseWorkflow):
         **kwargs,
     ) -> list[tuple]:
         app_ids: list[str] | None = kwargs.get("app_ids") or None
+        G0, G1 = self._G_PARALLEL, self._G_UAL
 
         return [
             (
                 ServicePrincipalsCollector,
                 {"days": None},
                 "Service principals (all apps)",
+                G0,
             ),
             (
                 AppRegistrationsCollector,
                 {"start_dt": start_dt, "end_dt": end_dt},
                 "App registrations (recent)",
+                G0,
             ),
             (
                 OAuthGrantsCollector,
                 {"users": users},
                 "OAuth grants",
+                G0,
             ),
             (
                 SPSignInLogsCollector,
@@ -80,16 +87,19 @@ class SPCompromiseWorkflow(BaseWorkflow):
                     **({"app_ids": app_ids} if app_ids else {}),
                 },
                 "Service principal sign-in logs",
+                G0,
             ),
             (
                 UsersCollector,
                 {"users": users, "start_dt": start_dt},
                 "User directory (consent attribution)",
+                G0,
             ),
             (
                 AuditLogsCollector,
                 {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Entra audit logs (consent & SP events)",
+                G0,
             ),
             (
                 UnifiedAuditCollector,
@@ -100,5 +110,6 @@ class SPCompromiseWorkflow(BaseWorkflow):
                     "poll_timeout": kwargs.get("ual_timeout", POLL_TIMEOUT),
                 },
                 "Unified Audit Log (app-token operations)",
+                G1,
             ),
         ]

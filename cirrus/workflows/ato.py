@@ -59,6 +59,10 @@ class ATOWorkflow(BaseWorkflow):
     name = "ATO"
     description = "Account Takeover investigation — authentication layer and persistence"
 
+    _G_INIT = 0
+    _G_PARALLEL = 1
+    _G_UAL = 2
+
     def _build_steps(
         self,
         users: list[str] | None,
@@ -66,71 +70,85 @@ class ATOWorkflow(BaseWorkflow):
         end_dt: datetime,
         **kwargs,
     ) -> list[tuple]:
+        G0, G1, G2 = self._G_INIT, self._G_PARALLEL, self._G_UAL
         return [
             (
                 UsersCollector,
                 {"users": users, "start_dt": start_dt},
                 "Resolving target user(s)",
+                G0,
             ),
             (
                 SignInLogsCollector,
                 {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Sign-in logs",
+                G1,
             ),
             (
                 AuditLogsCollector,
                 {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Entra directory audit logs",
+                G1,
             ),
             (
                 MFAMethodsCollector,
                 {"users": users, "start_dt": start_dt},
                 "MFA / authentication methods",
+                G1,
             ),
             (
                 RiskyUsersCollector,
                 {"users": users},
                 "Risky users (Identity Protection)",
+                G1,
             ),
             (
                 RiskySignInsCollector,
                 {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "Risky sign-ins (Identity Protection)",
+                G1,
             ),
             (
                 ConditionalAccessCollector,
                 {},
                 "Conditional Access policies",
+                G1,
             ),
             (
                 RegisteredDevicesCollector,
                 {"users": users, "start_dt": start_dt},
                 "Registered devices",
+                G1,
             ),
             (
                 OAuthGrantsCollector,
                 {"users": users},
                 "OAuth app grants",
+                G1,
             ),
             (
                 AppRegistrationsCollector,
                 {"start_dt": start_dt, "end_dt": end_dt},
                 "App registrations",
+                G1,
             ),
             (
                 SPSignInLogsCollector,
                 {"start_dt": start_dt, "end_dt": end_dt},
                 "Service principal sign-in logs",
+                G1,
             ),
             (
                 PIMActivationsCollector,
                 {"users": users, "start_dt": start_dt, "end_dt": end_dt},
                 "PIM role activation history",
+                G1,
             ),
             (
                 UnifiedAuditCollector,
                 {"users": users, "start_dt": start_dt, "end_dt": end_dt,
                  "poll_timeout": kwargs.get("ual_timeout", POLL_TIMEOUT)},
                 "Unified Audit Log (UAL)",
+                G2,
             ),
         ]

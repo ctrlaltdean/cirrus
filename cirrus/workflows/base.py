@@ -8,9 +8,13 @@ and render progress to the terminal via Rich.
 from __future__ import annotations
 
 import json as _json
+import time as _time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 
 from rich.console import Console
@@ -75,6 +79,7 @@ class BaseWorkflow:
     def __init__(self, token: str, case: Case, token_provider: Callable[[], str] | None = None) -> None:
         self.token = token
         self.case = case
+        self.case._workflow_token = token  # stored for post-run auto blast-radius
         self.token_provider = token_provider
 
     def run(
@@ -85,6 +90,7 @@ class BaseWorkflow:
         end_dt: datetime,
         extra_params: dict[str, Any] | None = None,
         run_analysis: bool = True,
+        sensitivity: str = "auto",
     ) -> WorkflowResult:
         """
         Execute the workflow.
@@ -95,10 +101,14 @@ class BaseWorkflow:
             start_dt:     Collection window start (UTC).
             end_dt:       Collection window end (UTC).
             extra_params: Additional params passed to collectors.
+            sensitivity:  Correlation sensitivity: "auto" (default), "low",
+                          "medium", or "high". "auto" detects tenant size
+                          and picks the appropriate level.
 
         Returns WorkflowResult with per-collector results.
         """
         params = extra_params or {}
+        self._sensitivity = sensitivity  # resolved later, after license probe
         result = WorkflowResult(
             workflow_name=self.name,
             tenant=tenant,
@@ -126,7 +136,58 @@ class BaseWorkflow:
         license_profile = TenantLicenseProfile.fetch(_probe_session)
         _render_license_banner(license_profile)
 
+        # Resolve "auto" sensitivity using tenant user count.
+        if self._sensitivity == "auto":
+            self._sensitivity = _detect_sensitivity(_probe_session)
+            console.print(
+                f"[dim]Sensitivity: {self._sensitivity} (auto-detected)[/dim]\n"
+            )
+
         steps = self._build_steps(users=users, start_dt=start_dt, end_dt=end_dt, **params)
+
+        # ── Group steps for parallel execution ───────────────────────────
+        # Each step is (cls, kwargs, name) or (cls, kwargs, name, group).
+        # Steps with the same group number run concurrently; groups execute
+        # sequentially (lower numbers first).  Steps without a group number
+        # are auto-assigned to sequential singleton groups.
+        grouped: dict[int, list[tuple]] = defaultdict(list)
+        auto_group = 0
+        for step in steps:
+            if len(step) >= 4:
+                grouped[step[3]].append(step[:3])
+            else:
+                grouped[auto_group].append(step[:3])
+            auto_group += 1
+
+        result_lock = Lock()
+
+        # ── Checkpoint: skip already-completed collectors on resume ────────
+        checkpoint_path = self.case.case_dir / ".collector_checkpoint.json"
+        completed_collectors: set[str] = set()
+        if checkpoint_path.exists():
+            try:
+                completed_collectors = set(
+                    _json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                )
+                if completed_collectors:
+                    console.print(
+                        f"[dim]Resuming: {len(completed_collectors)} collector(s) "
+                        f"already completed — skipping.[/dim]\n"
+                    )
+            except Exception:
+                pass
+
+        def _save_checkpoint(collector_name: str) -> None:
+            """Append a collector to the checkpoint file (thread-safe)."""
+            with result_lock:
+                completed_collectors.add(collector_name)
+                try:
+                    checkpoint_path.write_text(
+                        _json.dumps(sorted(completed_collectors), indent=2),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
 
         with Progress(
             SpinnerColumn(),
@@ -138,38 +199,63 @@ class BaseWorkflow:
         ) as progress:
             # Factory kept outside the loop so it doesn't capture loop variables.
             def _make_status_cb(
-                prog: Progress, t: Any, name: str
+                prog: Progress, t: Any, name: str, t0: float
             ) -> Callable[[str], None]:
                 def _cb(msg: str) -> None:
+                    elapsed = _time.monotonic() - t0
+                    if elapsed < 60:
+                        ts = f"{elapsed:.0f}s"
+                    else:
+                        ts = f"{elapsed / 60:.0f}m {elapsed % 60:.0f}s"
                     prog.update(
                         t,
-                        description=f"[bold blue]{name}[/bold blue]  [dim]{msg}[/dim]",
+                        description=(
+                            f"[bold blue]{name}[/bold blue]  "
+                            f"[dim]{ts} · {msg}[/dim]"
+                        ),
                     )
                 return _cb
 
             def _make_page_cb(
-                f: Any, col: GraphCollector
+                f: Any, col: GraphCollector, write_lock: Lock
             ) -> Callable[[list[dict]], None]:
                 """Write each page of raw records to the open NDJSON file handle."""
                 def _cb(page_records: list[dict]) -> None:
-                    for record in col.sofelk_transform(page_records):
-                        f.write(
-                            _json.dumps(record, ensure_ascii=False, default=str) + "\n"
-                        )
-                    f.flush()
+                    lines = [
+                        _json.dumps(record, ensure_ascii=False, default=str) + "\n"
+                        for record in col.sofelk_transform(page_records)
+                    ]
+                    with write_lock:
+                        f.writelines(lines)
+                        f.flush()
                 return _cb
 
-            for collector_cls, collector_kwargs, display_name in steps:
+            def _run_single_collector(
+                collector_cls: type,
+                collector_kwargs: dict,
+                display_name: str,
+            ) -> CollectionResult | None:
+                """Execute one collector — safe to call from a thread."""
+                # Check if already completed from a previous run
+                temp_collector = collector_cls.__new__(collector_cls)
+                coll_name = getattr(temp_collector, "name", collector_cls.__name__)
+                if coll_name in completed_collectors:
+                    task = progress.add_task(
+                        f"[dim]{display_name} (cached)[/dim]", total=1, completed=1
+                    )
+                    return None  # signal: skip
+
                 task = progress.add_task(
                     f"[bold blue]{display_name}[/bold blue]", total=None
                 )
+                collector_t0 = _time.monotonic()
                 collector: GraphCollector = collector_cls(self.token)
                 collector.license_profile = license_profile
                 collector.token_provider = self.token_provider
-                collector.on_status = _make_status_cb(progress, task, display_name)
+                collector.on_status = _make_status_cb(
+                    progress, task, display_name, collector_t0
+                )
 
-                # Open the NDJSON file before collection starts so records are
-                # streamed to disk page-by-page as they arrive.
                 ndjson_path = self.case.collection_dir / "json" / f"{collector.name}.ndjson"
                 ndjson_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -178,15 +264,27 @@ class BaseWorkflow:
                     {k: str(v) for k, v in collector_kwargs.items()},
                 )
 
+                file_lock = Lock()
                 with open(ndjson_path, "w", encoding="utf-8") as _ndjson_fh:
-                    collector.on_page = _make_page_cb(_ndjson_fh, collector)
+                    collector.on_page = _make_page_cb(_ndjson_fh, collector, file_lock)
 
                     try:
                         records = collector.collect(**collector_kwargs)
                     except CollectorError as e:
-                        # File is closed by the 'with' block on continue.
                         self.case.audit.log_collection_error(collector.name, str(e))
-                        cr = CollectionResult(
+                        fail_elapsed = _time.monotonic() - collector_t0
+                        if fail_elapsed < 60:
+                            fail_ts = f"{fail_elapsed:.0f}s"
+                        else:
+                            fail_ts = f"{fail_elapsed / 60:.0f}m {fail_elapsed % 60:.0f}s"
+                        progress.update(
+                            task, completed=0, total=1,
+                            description=(
+                                f"[red]{display_name} (FAILED)[/red]  "
+                                f"[dim]{fail_ts}[/dim]"
+                            ),
+                        )
+                        return CollectionResult(
                             collector_name=collector.name,
                             record_count=0,
                             json_path=Path(),
@@ -197,14 +295,7 @@ class BaseWorkflow:
                             ndjson_hash="",
                             error=str(e),
                         )
-                        result.results.append(cr)
-                        progress.update(
-                            task, completed=0, total=1,
-                            description=f"[red]{display_name} (FAILED)",
-                        )
-                        continue
 
-                # NDJSON file is now closed and complete — hash it.
                 ndjson_hash = file_sha256(ndjson_path)
 
                 json_path, csv_path, _, json_hash, csv_hash, _ = save_collection(
@@ -222,7 +313,20 @@ class BaseWorkflow:
                     json_hash,
                 )
 
-                cr = CollectionResult(
+                elapsed = _time.monotonic() - collector_t0
+                if elapsed < 60:
+                    ts = f"{elapsed:.0f}s"
+                else:
+                    ts = f"{elapsed / 60:.0f}m {elapsed % 60:.0f}s"
+                progress.update(
+                    task, completed=len(records), total=len(records),
+                    description=(
+                        f"[bold blue]{display_name}[/bold blue]  "
+                        f"[dim]{ts} · {len(records)} records[/dim]"
+                    ),
+                )
+                _save_checkpoint(collector.name)
+                return CollectionResult(
                     collector_name=collector.name,
                     record_count=len(records),
                     json_path=json_path,
@@ -233,8 +337,28 @@ class BaseWorkflow:
                     ndjson_hash=ndjson_hash,
                     ioc_count=ioc_count,
                 )
-                result.results.append(cr)
-                progress.update(task, completed=len(records), total=len(records))
+
+            # ── Execute groups sequentially; steps within a group in parallel ─
+            for group_key in sorted(grouped):
+                group_steps = grouped[group_key]
+                if len(group_steps) == 1:
+                    # Single step — run directly (no thread overhead).
+                    cls, kw, name = group_steps[0]
+                    cr = _run_single_collector(cls, kw, name)
+                    if cr is not None:
+                        result.results.append(cr)
+                else:
+                    # Multiple steps — run in parallel threads.
+                    with ThreadPoolExecutor(max_workers=len(group_steps)) as executor:
+                        futures = {
+                            executor.submit(_run_single_collector, cls, kw, name): name
+                            for cls, kw, name in group_steps
+                        }
+                        for future in as_completed(futures):
+                            cr = future.result()
+                            if cr is not None:
+                                with result_lock:
+                                    result.results.append(cr)
 
         self.case.audit.log_workflow_complete(self.name, result.total_records)
 
@@ -244,7 +368,10 @@ class BaseWorkflow:
         # can prompt the analyst or respect --collect-only).                 #
         # ------------------------------------------------------------------ #
         if run_analysis:
-            _run_correlation(self.case.case_dir, result, self.case)
+            _run_correlation(
+                self.case.case_dir, result, self.case,
+                sensitivity=self._sensitivity,
+            )
 
         return result
 
@@ -384,6 +511,14 @@ def _run_correlation(
         except Exception as exc:
             console.print(f"[dim]Excel workbook skipped: {exc}[/dim]")
 
+        # Auto blast-radius for HIGH-finding users
+        high_users = sorted({
+            f.get("user", "") for f in report.get("findings", [])
+            if f.get("severity") == "high" and f.get("user")
+        })
+        if high_users:
+            _run_auto_blast_radius(high_users, result, case, case_dir)
+
         # Remediation script — only surface it when there are actionable findings
         ps_path = case_dir / "remediation_commands.ps1"
         if ps_path.exists():
@@ -407,6 +542,108 @@ def _run_correlation(
             )
         except Exception:
             pass
+
+
+def _run_auto_blast_radius(
+    users: list[str],
+    result: "WorkflowResult",
+    case: "Case",
+    case_dir: Path,
+) -> None:
+    """
+    Auto-run blast-radius assessment for users that appear in HIGH findings.
+
+    Uses the same bearer token that was used for collection.  Results are
+    written to blast_radius_<user>.json inside the case directory and a
+    summary is printed to the terminal.
+    """
+    try:
+        from cirrus.analysis.blast_radius import run_blast_radius
+
+        # Recover the token from the case audit (written at workflow start).
+        # The workflow stores self.token but _run_correlation is a standalone
+        # function — we recover the token from the session headers that the
+        # workflow's probe_session used.  Alternatively, read the first
+        # collector's token from the result.  We'll use a fresh silent fetch
+        # if possible, otherwise skip.
+        token = case._meta.get("_bearer_token") if hasattr(case, "_meta") else None
+        if not token:
+            # Attempt to read token from the case audit log entry
+            try:
+                import re
+                audit_path = case_dir / "case_audit.txt"
+                if audit_path.exists():
+                    text = audit_path.read_text(encoding="utf-8")
+                    # The token is NOT stored in audit (sensitive) — we need
+                    # another approach.  Store it on the case object during run.
+                    pass
+            except Exception:
+                pass
+
+        # Use the stored token from workflow run
+        token = getattr(case, "_workflow_token", None)
+        if not token:
+            console.print("[dim]  Blast-radius skipped: no token available for re-use.[/dim]")
+            return
+
+        console.print(
+            f"\n[bold]Auto blast-radius:[/bold] assessing {len(users)} HIGH-finding user(s)..."
+        )
+
+        for upn in users[:10]:  # cap at 10 to avoid excessive API calls
+            try:
+                br_report = run_blast_radius(
+                    token=token,
+                    upn=upn,
+                    case_dir=case_dir,
+                    on_progress=lambda msg: None,  # silent
+                )
+                risk = br_report.overall_risk
+                risk_style = {"high": "red", "warn": "yellow"}.get(risk, "green")
+                dim_count = len(br_report.dimensions)
+                high_dims = [d for d in br_report.dimensions if d.status == "high"]
+                console.print(
+                    f"  [{risk_style}]{risk.upper():5s}[/{risk_style}]  "
+                    f"{upn}  "
+                    f"[dim]({dim_count} dimensions, {len(high_dims)} high-privilege)[/dim]"
+                )
+                case.audit.log_event("auto_blast_radius", {
+                    "user": upn,
+                    "overall_risk": risk,
+                    "high_dimensions": len(high_dims),
+                })
+            except Exception as exc:
+                console.print(f"  [dim]ERROR  {upn}: {exc}[/dim]")
+
+        console.print()
+
+    except Exception as exc:
+        console.print(f"[dim]Auto blast-radius skipped: {exc}[/dim]")
+
+
+def _detect_sensitivity(session: Any) -> str:
+    """
+    Auto-detect correlation sensitivity based on tenant user count.
+
+    Returns "high" for small tenants (<500 users), "low" for large
+    tenants (>5000), and "medium" for everything in between.
+    """
+    try:
+        resp = session.get(
+            "https://graph.microsoft.com/v1.0/users/$count",
+            headers={"ConsistencyLevel": "eventual"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            count = int(resp.text.strip())
+            if count < 500:
+                return "high"
+            if count > 5000:
+                return "low"
+            return "medium"
+    except Exception:
+        pass
+    return "medium"
 
 
 def _render_license_banner(profile: TenantLicenseProfile) -> None:

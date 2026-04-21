@@ -12,9 +12,11 @@ Commands:
     cirrus run ato        — run ATO investigation workflow
     cirrus run bec-ato    — run combined BEC+ATO full attack chain workflow
 
+    cirrus investigate    — full pipeline: triage + blast-radius + BEC+ATO + correlation
     cirrus triage         — quick targeted checks on a suspected compromised account
     cirrus enrich         — enrich IPs from an existing case with geo/ASN/threat data
     cirrus blast-radius   — map access dimensions of a potentially compromised account
+    cirrus hunt           — tenant-wide threat hunt (→ investigate pipeline on HIGH users)
     cirrus analyze        — re-run cross-collector correlation on an existing case
     cirrus case verify    — verify chain-of-custody integrity for a case folder
 
@@ -80,11 +82,11 @@ from cirrus.workflows.sp_compromise import SPCompromiseWorkflow
 app = typer.Typer(
     name="cirrus",
     help="CIRRUS — Cloud Incident Response & Reconnaissance Utility Suite",
-    no_args_is_help=True,
+    invoke_without_command=True,
     rich_markup_mode="rich",
 )
 auth_app = typer.Typer(help="Manage authentication and cached credentials.", no_args_is_help=True)
-run_app = typer.Typer(help="Run investigation workflows.", no_args_is_help=True)
+run_app = typer.Typer(help="Run investigation workflows.", invoke_without_command=True)
 case_app = typer.Typer(help="Manage investigation cases.", no_args_is_help=True)
 deps_app = typer.Typer(help="Check and install optional dependencies.", no_args_is_help=True)
 scan_app = typer.Typer(help="Email security posture scanning (DNS/SMTP/Tenant).", no_args_is_help=True)
@@ -98,6 +100,69 @@ app.add_typer(scan_app, name="scan")
 console = Console()
 
 DEFAULT_OUTPUT_DIR = Path("investigations")
+
+# ── Main app menu items (shown when `cirrus` is run with no arguments) ────
+_MAIN_MENU = [
+    ("investigate", "Full Investigation",  "Triage + Blast Radius + BEC+ATO + Correlation for one or more users"),
+    ("triage",      "Quick Triage",        "8 parallel checks on a suspected compromised account"),
+    ("run",         "Collection Workflows", "Choose BEC, ATO, BEC+ATO, Full, or SP workflow"),
+    ("hunt",        "Threat Hunt",         "Tenant-wide proactive hunt — no starting account required"),
+    ("blast-radius","Blast Radius",        "Map all access dimensions of a potentially compromised account"),
+    ("analyze",     "Re-Analyze Case",     "Re-run correlation on an existing case folder"),
+]
+
+
+@app.callback()
+def _app_callback(ctx: typer.Context) -> None:
+    """CIRRUS — Cloud Incident Response & Reconnaissance Utility Suite"""
+    if ctx.invoked_subcommand is not None:
+        return  # A specific command was given — let it run.
+
+    _banner()
+    console.print(Panel.fit(
+        "[bold]Welcome to CIRRUS[/bold]\n"
+        "[dim]Select what you'd like to do, or run [bold]cirrus --help[/bold] for all commands.\n"
+        "Press Ctrl+C at any time to cancel.[/dim]",
+        border_style="bright_blue",
+    ))
+    console.print()
+
+    table = Table(show_header=True, box=None, padding=(0, 2))
+    table.add_column("#", style="bold cyan", width=3)
+    table.add_column("Action", style="bold", min_width=20)
+    table.add_column("Description", style="dim")
+    for idx, (slug, label, desc) in enumerate(_MAIN_MENU, 1):
+        table.add_row(str(idx), label, desc)
+    console.print(table)
+    console.print()
+
+    while True:
+        choice = Prompt.ask(
+            "Select [dim](1-6, or name like 'investigate')[/dim]",
+            default="1",
+        ).strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(_MAIN_MENU):
+            selected_slug = _MAIN_MENU[int(choice) - 1][0]
+            break
+        slugs = {slug for slug, _, _ in _MAIN_MENU}
+        if choice.lower() in slugs:
+            selected_slug = choice.lower()
+            break
+        console.print(f"[red]Invalid choice: {choice!r}. Enter 1-{len(_MAIN_MENU)} or a command name.[/red]")
+
+    console.print()
+    # Dispatch — for top-level commands, invoke directly; for 'run', invoke the run callback
+    if selected_slug == "run":
+        ctx.invoke(run_callback)
+    elif selected_slug == "analyze":
+        # analyze requires a case_dir argument — prompt for it
+        from rich.prompt import Prompt as _P
+        case_path = _P.ask("Path to case folder").strip()
+        ctx.invoke(analyze, case_dir=Path(case_path))
+    else:
+        cmd = ctx.command.commands.get(selected_slug)
+        if cmd:
+            ctx.invoke(cmd)
 
 # ---------------------------------------------------------------------------
 # Silent update check (runs at banner display, rate-limited to once/24 h)
@@ -249,6 +314,7 @@ def _show_run_summary(
         "ato": "ATO Investigation",
         "bec-ato": "BEC + ATO Investigation",
         "full": "Full Tenant Collection",
+        "sp": "Service Principal Compromise",
     }.get(workflow, workflow.upper())
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Key", style="bold", min_width=14)
@@ -768,6 +834,68 @@ def _maybe_run_analysis(
 # ---------------------------------------------------------------------------
 # run commands
 # ---------------------------------------------------------------------------
+
+# ── Workflow menu descriptions (for the interactive guided launcher) ──────
+_WORKFLOW_MENU = [
+    ("bec",     "BEC Investigation",
+     "Mailbox-focused: inbox rules, forwarding, delegation, sign-ins, UAL"),
+    ("ato",     "ATO Investigation",
+     "Auth-layer focused: sign-ins, MFA, devices, OAuth, PIM, app registrations"),
+    ("bec-ato", "BEC + ATO (Recommended)",
+     "Full attack chain — combines BEC and ATO into one run (no duplication)"),
+    ("full",    "Full Tenant Collection",
+     "Every collector in CIRRUS — large output, use for broad-scope incidents"),
+    ("sp",      "Service Principal Compromise",
+     "App/service principal sign-ins, credentials, and permissions"),
+]
+
+
+@run_app.callback()
+def run_callback(ctx: typer.Context) -> None:
+    """Run investigation workflows. Launch without a subcommand for the guided menu."""
+    if ctx.invoked_subcommand is not None:
+        return  # A specific subcommand was given — let it handle everything.
+
+    _banner()
+    console.print(Panel.fit(
+        "[bold]Investigation Workflow Launcher[/bold]\n"
+        "[dim]Select a workflow to begin a guided investigation.\n"
+        "Press Ctrl+C at any time to cancel.[/dim]",
+        border_style="bright_blue",
+    ))
+    console.print()
+
+    # Display numbered workflow choices
+    table = Table(show_header=True, box=None, padding=(0, 2))
+    table.add_column("#", style="bold cyan", width=3)
+    table.add_column("Workflow", style="bold", min_width=16)
+    table.add_column("Description", style="dim")
+    for idx, (slug, label, desc) in enumerate(_WORKFLOW_MENU, 1):
+        table.add_row(str(idx), label, desc)
+    console.print(table)
+    console.print()
+
+    # Prompt for selection
+    while True:
+        choice = Prompt.ask(
+            "Select workflow [dim](1-5, or name like 'bec')[/dim]",
+            default="3",
+        ).strip()
+        # Accept by number
+        if choice.isdigit() and 1 <= int(choice) <= len(_WORKFLOW_MENU):
+            selected_slug = _WORKFLOW_MENU[int(choice) - 1][0]
+            break
+        # Accept by slug
+        slugs = {slug for slug, _, _ in _WORKFLOW_MENU}
+        if choice.lower() in slugs:
+            selected_slug = choice.lower()
+            break
+        console.print(f"[red]Invalid choice: {choice!r}. Enter 1-{len(_WORKFLOW_MENU)} or a workflow name.[/red]")
+
+    # Dispatch to the selected workflow's command (with no args → triggers its wizard)
+    console.print()
+    ctx.invoke(ctx.command.commands[selected_slug])
+
 
 @run_app.command("bec")
 def run_bec(
@@ -2717,6 +2845,192 @@ def _render_blast_radius_report(report: "BlastRadiusReport") -> None:
 
 
 # ---------------------------------------------------------------------------
+# Investigate command
+# ---------------------------------------------------------------------------
+
+@app.command("investigate")
+def investigate(
+    tenant:      TenantRunOpt = None,
+    user:        Annotated[Optional[str], typer.Option("--user", help="Single target user UPN.")] = None,
+    users:       UsersOpt = None,
+    users_file:  UsersFileOpt = None,
+    days:        DaysOpt = None,
+    start_date:  StartDateOpt = None,
+    end_date:    EndDateOpt = None,
+    output_dir:  OutputDirOpt = DEFAULT_OUTPUT_DIR,
+    case_name:   CaseNameOpt = None,
+    client_id:   ClientIdOpt = None,
+    collect_only: CollectOnlyOpt = False,
+    ual_timeout: UalTimeoutOpt = 7200,
+    sensitivity: SensitivityOpt = "auto",
+) -> None:
+    """
+    [bold]Full Investigation Pipeline[/bold]
+
+    All-in-one command that runs the complete investigation pipeline for one
+    or more users:
+
+    1. [cyan]Triage[/cyan]       — 8 parallel checks for quick risk assessment
+    2. [cyan]Blast radius[/cyan] — map all access dimensions and privilege levels
+    3. [cyan]BEC+ATO[/cyan]      — full attack-chain collection workflow
+    4. [cyan]Correlation[/cyan]  — cross-collector IOC analysis with MITRE mapping
+
+    All artifacts land in a single case folder. Use this when you know an
+    account is compromised and you need the complete forensic picture.
+
+    \\b
+    Examples:
+        cirrus investigate --tenant contoso.com --user john@contoso.com
+        cirrus investigate --tenant contoso.com --users john@contoso.com --users jane@contoso.com
+        cirrus investigate --tenant contoso.com --users-file suspects.txt --days 14
+        cirrus investigate --tenant contoso.com --user john@contoso.com --start-date 2026-04-01 --end-date 2026-04-15
+    """
+    from cirrus.analysis.blast_radius import run_blast_radius
+    from cirrus.analysis.triage import TriageRunner
+
+    _banner()
+
+    # ── Interactive prompts if needed ─────────────────────────────────────
+    interactive = tenant is None
+    if interactive:
+        console.print(Panel.fit(
+            "[bold]Full Investigation Pipeline[/bold]\n"
+            "[dim]Triage → Blast Radius → BEC+ATO Collection → Correlation\n"
+            "Press Ctrl+C at any time to cancel.[/dim]",
+            border_style="bright_blue",
+        ))
+        console.print()
+        tenant = _prompt_tenant()
+
+    # ── Resolve target users ──────────────────────────────────────────────
+    # investigate does not support --all-users (always user-targeted)
+    target_users = _resolve_users(user, users, users_file, all_users=False)
+    if target_users is None or len(target_users) == 0:
+        console.print("[red]At least one target user is required for investigate.[/red]")
+        raise typer.Exit(1)
+
+    start_dt, end_dt = _resolve_date_range(days, start_date, end_date)
+
+    targets_display = ", ".join(target_users) if len(target_users) <= 5 else f"{', '.join(target_users[:5])} (+{len(target_users) - 5} more)"
+    console.print(f"[bold magenta]Workflow:[/bold magenta] Full Investigation Pipeline")
+    console.print(f"[bold]Tenant:[/bold]   [cyan]{tenant}[/cyan]")
+    console.print(f"[bold]Targets:[/bold]  [cyan]{targets_display}[/cyan]")
+    console.print(f"[bold]Window:[/bold]   {start_dt.strftime(_DATE_FMT)} → {end_dt.strftime(_DATE_FMT)}\n")
+
+    # ── Auth ──────────────────────────────────────────────────────────────
+    token, username = _authenticate(tenant, client_id)
+    _client_id = client_id
+
+    # ── Case folder ───────────────────────────────────────────────────────
+    if interactive and case_name is None:
+        case_name_input = Prompt.ask(
+            "Case name [dim](optional — leave blank to auto-generate)[/dim]",
+            default="",
+        ).strip()
+        case_name = case_name_input or None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    case = Case.create(tenant, output_dir, case_name)
+    console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
+
+    case.audit.log_event("INVESTIGATION_START", {
+        "users": target_users,
+        "tenant": tenant,
+        "start_date": start_dt.strftime(_DATE_FMT),
+        "end_date": end_dt.strftime(_DATE_FMT),
+    })
+
+    # ── Phase 1: Triage ──────────────────────────────────────────────────
+    console.print(Panel.fit(
+        "[bold cyan]Phase 1: Triage[/bold cyan]",
+        border_style="cyan",
+    ))
+    try:
+        import requests as _requests
+        session = _requests.Session()
+        session.headers.update(
+            {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        )
+        runner = TriageRunner(session, case, target_users)
+        triage_report = runner.run()
+
+        verdict = triage_report.get("verdict", "unknown")
+        verdict_style = {
+            "compromised": "red",
+            "suspicious": "yellow",
+            "clean": "green",
+        }.get(verdict, "white")
+        flag_count = triage_report.get("total_flags", 0)
+        console.print(
+            f"  Verdict: [{verdict_style}]{verdict.upper()}[/{verdict_style}]  "
+            f"({flag_count} flags across {len(target_users)} user(s))\n"
+        )
+    except Exception as exc:
+        console.print(f"  [yellow]Triage failed: {exc}[/yellow]\n")
+
+    # ── Phase 2: Blast Radius (per user) ─────────────────────────────────
+    console.print(Panel.fit(
+        "[bold cyan]Phase 2: Blast Radius[/bold cyan]",
+        border_style="cyan",
+    ))
+    for upn in target_users[:20]:  # cap to avoid excessive API calls
+        try:
+            br_report = run_blast_radius(
+                token=token,
+                upn=upn,
+                tenant=tenant,
+                case_dir=case.case_dir,
+                on_progress=lambda msg: None,  # quiet
+            )
+            risk = br_report.overall_risk
+            risk_style = {"high": "red", "warn": "yellow"}.get(risk, "green")
+            high_dims = [d for d in br_report.dimensions if d.status == "high"]
+            console.print(
+                f"  [{risk_style}]{risk.upper():5s}[/{risk_style}]  "
+                f"{upn}  "
+                f"[dim]({len(br_report.dimensions)} dimensions, "
+                f"{len(high_dims)} high-privilege)[/dim]"
+            )
+        except Exception as exc:
+            console.print(f"  [dim]ERROR  {upn}: {exc}[/dim]")
+    console.print()
+
+    # ── Phase 3: BEC+ATO Collection ──────────────────────────────────────
+    console.print(Panel.fit(
+        "[bold cyan]Phase 3: BEC+ATO Collection[/bold cyan]",
+        border_style="cyan",
+    ))
+    token_provider = lambda: get_token(tenant, **({'client_id': _client_id} if _client_id else {}))
+    workflow = BECATOWorkflow(token, case, token_provider=token_provider)
+    result = workflow.run(
+        users=target_users,
+        tenant=tenant,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        extra_params={"ual_timeout": ual_timeout},
+        run_analysis=False,
+        sensitivity=sensitivity,
+    )
+
+    render_summary(result)
+    if result.errors:
+        console.print(f"[yellow]{len(result.errors)} collector(s) encountered errors.[/yellow]")
+
+    # ── Phase 4: Correlation ─────────────────────────────────────────────
+    if not collect_only:
+        _maybe_run_analysis(case, result, collect_only=False, interactive=False, sensitivity=sensitivity)
+
+    case.audit.log_event("INVESTIGATION_COMPLETE", {
+        "users": target_users,
+        "total_records": result.total_records,
+    })
+
+    console.print("[bold green]Investigation complete.[/bold green]")
+    console.print(f"[bold]Case folder:[/bold] {case.case_dir}\n")
+    case.close()
+
+
+# ---------------------------------------------------------------------------
 # Hunt command
 # ---------------------------------------------------------------------------
 
@@ -2830,12 +3144,38 @@ def hunt(
             f"[bold red]{high_count} HIGH[/bold red]   "
             f"[bold yellow]{medium_count} MEDIUM[/bold yellow]   "
             f"[dim]{report.total_signals} total signal(s)[/dim]\n\n"
-            "[dim]Next step: run [bold]cirrus triage[/bold] on suspicious accounts, "
-            "or [bold]cirrus run ato[/bold] to collect full evidence.[/dim]",
+            "[dim]Next step: run [bold]cirrus investigate[/bold] on suspicious accounts, "
+            "or [bold]cirrus triage[/bold] for a quick check.[/dim]",
             border_style="red" if high_count else "yellow",
             expand=False,
         )
     )
+
+    # ── Hunt → Investigate pipeline ──────────────────────────────────────────
+    # If there are HIGH user targets, offer to launch investigate on them.
+    high_user_targets = [
+        t for t in report.high_targets
+        if t.target_type == "user" and "@" in t.name
+    ]
+    if high_user_targets:
+        console.print()
+        if Confirm.ask(
+            f"[bold yellow]Launch full investigation on {len(high_user_targets)} "
+            f"HIGH-severity user(s)?[/bold yellow]",
+            default=False,
+        ):
+            for t in high_user_targets[:5]:  # cap at 5 users
+                console.print(f"\n[bold]Investigating: {t.name}[/bold]")
+                try:
+                    investigate(
+                        tenant=tenant,
+                        user=t.name,
+                        days=days,
+                    )
+                except SystemExit:
+                    pass
+                except Exception as exc:
+                    console.print(f"[yellow]Investigation failed for {t.name}: {exc}[/yellow]")
 
 
 # ---------------------------------------------------------------------------
