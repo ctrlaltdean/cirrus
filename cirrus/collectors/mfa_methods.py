@@ -149,13 +149,7 @@ class MFAMethodsCollector(GraphCollector):
         Returns list of method dicts, each with _iocFlags, _sourceUser,
         and _methodType.
         """
-        if users is None:
-            user_list = self._collect_all(
-                f"{GRAPH_BASE}/users",
-                params={"$select": "id,userPrincipalName,displayName", "$top": 999},
-            )
-        else:
-            user_list = [{"userPrincipalName": u, "id": u} for u in users]
+        user_list = self._resolve_users(users)
 
         all_methods: list[dict] = []
         for user in user_list:

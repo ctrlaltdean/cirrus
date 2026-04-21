@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from cirrus.collectors.base import GRAPH_BASE, GraphCollector
-from cirrus.utils.helpers import days_ago_filter, dt_to_odata, is_private_ip
+from cirrus.utils.helpers import is_private_ip
 
 # ── High-privilege roles — assignment always flagged separately ───────────────
 _HIGH_PRIV_ROLES: frozenset[str] = frozenset({
@@ -232,11 +232,7 @@ class AuditLogsCollector(GraphCollector):
 
         Returns list of audit event dicts, each with an _iocFlags list.
         """
-        since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
-        filters = [f"activityDateTime ge {since}"]
-
-        if end_dt is not None:
-            filters.append(f"activityDateTime le {dt_to_odata(end_dt)}")
+        filters = self._build_date_filter(start_dt, end_dt, days, field="activityDateTime")
 
         if users:
             user_filters = " or ".join(

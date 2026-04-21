@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import Any
 
 from cirrus.collectors.base import GRAPH_BASE, GraphCollector
-from cirrus.utils.helpers import days_ago_filter, dt_to_odata, is_private_ip
+from cirrus.utils.helpers import is_private_ip
 
 # ── Sensitive Microsoft resources — flag SP auth targeting these ──────────────
 # These APIs grant broad access; SP auth against them warrants attention.
@@ -218,11 +218,7 @@ class SPSignInLogsCollector(GraphCollector):
             "require Entra ID P1 or higher.",
         )
 
-        since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
-        filters = [f"createdDateTime ge {since}"]
-
-        if end_dt is not None:
-            filters.append(f"createdDateTime le {dt_to_odata(end_dt)}")
+        filters = self._build_date_filter(start_dt, end_dt, days)
 
         if app_ids:
             id_filters = " or ".join(f"appId eq '{a}'" for a in app_ids)

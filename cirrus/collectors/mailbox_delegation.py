@@ -43,13 +43,7 @@ class MailboxDelegationCollector(GraphCollector):
         Returns one record per delegate relationship found, annotated with
         IOC flags. Clean mailboxes (no delegates) are not included.
         """
-        if users is None:
-            user_list = self._collect_all(
-                f"{GRAPH_BASE}/users",
-                params={"$select": "id,userPrincipalName,displayName,mail", "$top": 999},
-            )
-        else:
-            user_list = [{"userPrincipalName": u, "id": u} for u in users]
+        user_list = self._resolve_users(users, select="id,userPrincipalName,displayName,mail")
 
         results: list[dict] = []
         for user in user_list:

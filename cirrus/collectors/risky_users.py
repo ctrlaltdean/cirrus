@@ -30,7 +30,6 @@ from datetime import datetime
 from typing import Any
 
 from cirrus.collectors.base import GRAPH_BASE, GraphCollector
-from cirrus.utils.helpers import days_ago_filter, dt_to_odata
 
 
 class RiskyUsersCollector(GraphCollector):
@@ -113,11 +112,7 @@ class RiskySignInsCollector(GraphCollector):
             "This tenant appears to be licensed at P1 only.",
         )
 
-        since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
-        filters = [f"createdDateTime ge {since}"]
-
-        if end_dt is not None:
-            filters.append(f"createdDateTime le {dt_to_odata(end_dt)}")
+        filters = self._build_date_filter(start_dt, end_dt, days)
 
         if users:
             user_filter = " or ".join(

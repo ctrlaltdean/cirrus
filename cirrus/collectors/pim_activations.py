@@ -39,7 +39,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from cirrus.collectors.base import GRAPH_BETA, GraphCollector
-from cirrus.utils.helpers import dt_to_odata, days_ago_filter
 
 # ── High-privilege roles — activation always raised as HIGH_PRIV ──────────────
 _HIGH_PRIV_ROLES: frozenset[str] = frozenset({
@@ -217,14 +216,8 @@ class PIMActivationsCollector(GraphCollector):
             "PIM activation logs require Entra ID P2 (Privileged Identity Management is a P2 feature).",
         )
 
-        since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
-        filters = [
-            f"activityDateTime ge {since}",
-            "loggedByService eq 'PIM'",
-        ]
-
-        if end_dt is not None:
-            filters.append(f"activityDateTime le {dt_to_odata(end_dt)}")
+        filters = self._build_date_filter(start_dt, end_dt, days, field="activityDateTime")
+        filters.append("loggedByService eq 'PIM'")
 
         params: dict[str, Any] = {
             "$filter": " and ".join(filters),

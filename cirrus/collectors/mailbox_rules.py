@@ -93,14 +93,7 @@ class MailboxRulesCollector(GraphCollector):
 
         Returns list of rule dicts, each annotated with the source user's UPN.
         """
-        if users is None:
-            # Fetch all users then iterate — practical only on smaller tenants
-            user_list = self._collect_all(
-                f"{GRAPH_BASE}/users",
-                params={"$select": "id,userPrincipalName,displayName", "$top": 999},
-            )
-        else:
-            user_list = [{"userPrincipalName": u, "id": u} for u in users]
+        user_list = self._resolve_users(users)
 
         # Try to pre-fetch an EXO token once for PS fallback on 403 errors.
         # Decode the tenant ID from the session's bearer token.

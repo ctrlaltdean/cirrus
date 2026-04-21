@@ -235,6 +235,45 @@ class GraphCollector:
         if not self.license_profile.allows(feature):
             raise CollectorError(f"Skipped: {detail}")
 
+    def _resolve_users(
+        self,
+        users: list[str] | None,
+        select: str = "id,userPrincipalName,displayName",
+    ) -> list[dict]:
+        """
+        Return a list of user dicts to iterate over.
+
+        If *users* is provided, wraps each UPN in a dict. Otherwise fetches
+        all users from the tenant with the given $select fields.
+        """
+        if users is not None:
+            return [{"userPrincipalName": u, "id": u} for u in users]
+        return self._collect_all(
+            f"{GRAPH_BASE}/users",
+            params={"$select": select, "$top": 999},
+        )
+
+    @staticmethod
+    def _build_date_filter(
+        start_dt: "datetime | None",
+        end_dt: "datetime | None",
+        days: int,
+        field: str = "createdDateTime",
+    ) -> list[str]:
+        """
+        Build OData date-range filter clauses.
+
+        Returns a list of filter strings like
+        ``["createdDateTime ge 2024-01-01T00:00:00Z"]``.
+        """
+        from cirrus.utils.helpers import days_ago_filter, dt_to_odata
+
+        since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)
+        filters = [f"{field} ge {since}"]
+        if end_dt is not None:
+            filters.append(f"{field} le {dt_to_odata(end_dt)}")
+        return filters
+
     def sofelk_transform(self, records: list[dict]) -> list[dict]:
         """
         Transform records into SOF-ELK compatible NDJSON format.
