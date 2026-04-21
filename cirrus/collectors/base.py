@@ -127,7 +127,13 @@ class GraphCollector:
             except Exception as http_err:
                 raise CollectorError(f"HTTP {resp.status_code}: {url} — {http_err}") from http_err
 
-            return resp.json()
+            try:
+                return resp.json()
+            except Exception:
+                raise CollectorError(
+                    f"JSON decode error from {url} — "
+                    f"status {resp.status_code}, body: {resp.text[:300]!r}"
+                )
 
         raise CollectorError(f"Failed after {MAX_RETRIES} retries: {url}")
 
@@ -168,7 +174,13 @@ class GraphCollector:
             except Exception as http_err:
                 raise CollectorError(f"HTTP {resp.status_code}: {url} — {http_err}") from http_err
 
-            return resp.json()
+            try:
+                return resp.json()
+            except Exception:
+                raise CollectorError(
+                    f"JSON decode error from POST {url} — "
+                    f"status {resp.status_code}, body: {resp.text[:300]!r}"
+                )
 
         raise CollectorError(f"POST failed after {MAX_RETRIES} retries: {url}")
 
