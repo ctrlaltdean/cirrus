@@ -264,8 +264,14 @@ def _hunt_signin_anomalies(
                     f"Identity Protection risk state: {risk_state}",
                 ))
 
-        # Impossible travel: consecutive sign-ins from different countries ≤ 2h
-        sorted_recs = sorted(user_records, key=lambda r: _parse_dt(r.get("createdDateTime") or ""))
+        # Impossible travel: consecutive *successful* sign-ins from different countries ≤ 2h
+        # Filter to successful sign-ins only (errorCode == 0) to avoid false positives
+        # from failed auth attempts which can originate from anywhere.
+        successful_recs = [
+            r for r in user_records
+            if ((r.get("status") or {}).get("errorCode") or 0) == 0
+        ]
+        sorted_recs = sorted(successful_recs, key=lambda r: _parse_dt(r.get("createdDateTime") or ""))
         for i in range(len(sorted_recs) - 1):
             r1, r2 = sorted_recs[i], sorted_recs[i + 1]
             c1 = (r1.get("location") or {}).get("countryOrRegion") or ""
