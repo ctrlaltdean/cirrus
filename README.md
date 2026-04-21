@@ -1133,6 +1133,13 @@ cirrus case list --output-dir D:\Cases
 
 # Verify the chain-of-custody integrity of a case
 cirrus case verify investigations/CONTOSO_20260317_143022
+
+# Package a case for legal handoff / evidence transfer
+# Creates a timestamped .zip with all collection data, analysis, and audit logs
+cirrus case package investigations/CONTOSO_20260317_143022
+
+# Package with a custom output path
+cirrus case package investigations/CONTOSO_20260317_143022 --output D:\Evidence\contoso.zip
 ```
 
 ---
