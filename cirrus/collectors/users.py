@@ -134,7 +134,7 @@ class UsersCollector(GraphCollector):
                     records.append(user)
                 except Exception as e:
                     records.append({
-                        "_requestedUser": upn,
+                        "_sourceUser": upn,
                         "_error": str(e),
                         "_iocFlags": [],
                     })

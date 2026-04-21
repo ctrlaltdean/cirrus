@@ -213,8 +213,8 @@ class PIMActivationsCollector(GraphCollector):
         Returns list of PIM audit event dicts, each with _iocFlags.
         """
         self._require_license(
-            "p1",
-            "PIM activation logs require Entra ID P1 or higher (same as AuditLog.Read.All).",
+            "p2",
+            "PIM activation logs require Entra ID P2 (Privileged Identity Management is a P2 feature).",
         )
 
         since = dt_to_odata(start_dt) if start_dt else days_ago_filter(days)

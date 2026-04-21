@@ -398,7 +398,15 @@ def _run_correlation(
                 pass
 
     except Exception as exc:
-        console.print(f"\n[dim]Correlation skipped: {exc}[/dim]")
+        console.print(f"\n[yellow]Correlation failed: {exc}[/yellow]")
+        try:
+            import traceback
+            case.audit.log_event(
+                "correlation_error",
+                {"error": str(exc), "traceback": traceback.format_exc()},
+            )
+        except Exception:
+            pass
 
 
 def _render_license_banner(profile: TenantLicenseProfile) -> None:

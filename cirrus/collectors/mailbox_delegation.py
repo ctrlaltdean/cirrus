@@ -62,8 +62,8 @@ class MailboxDelegationCollector(GraphCollector):
                     params={},
                 )
             except CollectorError as e:
-                if "403" in str(e) or "404" in str(e):
-                    continue  # no access or no mailbox — skip silently
+                if "404" in str(e):
+                    continue  # no mailbox — skip silently
                 results.append({"_sourceUser": upn, "_error": str(e), "_iocFlags": []})
                 continue
 
