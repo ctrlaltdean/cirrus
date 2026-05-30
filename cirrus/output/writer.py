@@ -1,3 +1,7 @@
+# Copyright (c) 2026 FLINTEK LLC
+# Licensed under the Apache License, Version 2.0.
+# See LICENSE in the project root for license information.
+
 """
 Output writers: JSON, CSV, and NDJSON.
 
@@ -22,6 +26,26 @@ from pathlib import Path
 from typing import Any
 
 from cirrus.utils.helpers import file_sha256
+
+
+# Characters that make a spreadsheet treat a cell as a formula. A value
+# starting with one of these can execute (CSV/Excel formula injection / DDE)
+# when an analyst opens the workbook, so we prefix such cells with a single
+# quote to neutralize them. See AUDIT.md EF3.
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def sanitize_formula(value: Any) -> Any:
+    """
+    Neutralize spreadsheet formula injection for a single cell value.
+
+    Only string values are affected; non-strings are returned unchanged. A
+    leading formula-trigger character is escaped by prepending a single quote,
+    which spreadsheets render as plain text.
+    """
+    if isinstance(value, str) and value[:1] in _FORMULA_TRIGGERS:
+        return "'" + value
+    return value
 
 
 def flatten(obj: Any, prefix: str = "", sep: str = ".") -> dict[str, Any]:
@@ -81,7 +105,10 @@ def write_csv(records: list[dict], path: Path) -> str:
         path.write_text("", encoding="utf-8")
         return file_sha256(path)
 
-    flat_records = [flatten(r) for r in records]
+    flat_records = [
+        {k: sanitize_formula(v) for k, v in flatten(r).items()}
+        for r in records
+    ]
 
     # Union of all keys across all records to handle sparse fields
     all_keys: list[str] = []

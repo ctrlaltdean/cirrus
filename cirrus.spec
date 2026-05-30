@@ -1,3 +1,7 @@
+# Copyright (c) 2026 FLINTEK LLC
+# Licensed under the Apache License, Version 2.0.
+# See LICENSE in the project root for license information.
+
 # PyInstaller spec file for CIRRUS — compatible with PyInstaller 6.x
 # Build: pyinstaller cirrus.spec
 # Output: dist/cirrus  (or dist/cirrus.exe on Windows)

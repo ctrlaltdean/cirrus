@@ -1,3 +1,7 @@
+# Copyright (c) 2026 FLINTEK LLC
+# Licensed under the Apache License, Version 2.0.
+# See LICENSE in the project root for license information.
+
 """
 Base collector class.
 
@@ -27,6 +31,23 @@ BACKOFF_BASE = 2  # seconds
 
 # Entra ID P2 service plan ID — required for Identity Protection endpoints
 _P2_SERVICE_PLAN_ID = "eec0eb4f-6444-4f95-aba0-50c24d67f998"
+
+
+def _parse_retry_after(raw: str | None, fallback: int) -> int:
+    """
+    Parse a Retry-After header value into a number of seconds.
+
+    Per RFC 7231 the value may be either an integer number of seconds or an
+    HTTP-date. Microsoft Graph returns integer seconds, but we fall back to the
+    caller's computed backoff for anything non-numeric (including HTTP-dates)
+    rather than letting int() raise and abort the collector.
+    """
+    if raw is None:
+        return fallback
+    try:
+        return max(0, int(raw))
+    except (ValueError, TypeError):
+        return fallback
 
 
 class CollectorError(Exception):
@@ -83,7 +104,9 @@ class GraphCollector:
             resp = self.session.get(url, params=params, timeout=60)
 
             if resp.status_code == 429:
-                retry_after = int(resp.headers.get("Retry-After", BACKOFF_BASE * attempt))
+                retry_after = _parse_retry_after(
+                    resp.headers.get("Retry-After"), BACKOFF_BASE * attempt
+                )
                 time.sleep(retry_after)
                 continue
 
@@ -143,7 +166,9 @@ class GraphCollector:
             resp = self.session.post(url, json=body, timeout=60)
 
             if resp.status_code == 429:
-                retry_after = int(resp.headers.get("Retry-After", BACKOFF_BASE * attempt))
+                retry_after = _parse_retry_after(
+                    resp.headers.get("Retry-After"), BACKOFF_BASE * attempt
+                )
                 time.sleep(retry_after)
                 continue
 

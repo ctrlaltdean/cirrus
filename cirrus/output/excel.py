@@ -1,3 +1,7 @@
+# Copyright (c) 2026 FLINTEK LLC
+# Licensed under the Apache License, Version 2.0.
+# See LICENSE in the project root for license information.
+
 """
 Excel workbook generator.
 
@@ -20,6 +24,8 @@ import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+
+from cirrus.output.writer import sanitize_formula
 
 
 # Sheet name → colour (hex, no #) for the header fill.
@@ -91,7 +97,7 @@ def _build_summary_sheet(wb, case_dir: Path, sheet_map: dict[str, str] | None = 
     def _cell(row: int, col: int, value: str, bold: bool = False,
               fg: str = "000000", bg: str | None = None,
               align: str = "left", wrap: bool = False) -> None:
-        c = ws.cell(row=row, column=col, value=value)
+        c = ws.cell(row=row, column=col, value=sanitize_formula(value))
         c.font = Font(bold=bold, color=fg)
         if bg:
             c.fill = _hfill(bg)
@@ -198,7 +204,7 @@ def _build_summary_sheet(wb, case_dir: Path, sheet_map: dict[str, str] | None = 
             _cell(row, 1, upn, bg=s_bg)
 
             # Check label cell — hyperlink to the corresponding data sheet if available
-            label_cell = ws.cell(row=row, column=2, value=label)
+            label_cell = ws.cell(row=row, column=2, value=sanitize_formula(label))
             label_cell.font = Font(color="000000")
             label_cell.fill = PatternFill("solid", fgColor=s_bg)
             label_cell.alignment = Alignment(horizontal="left", vertical="center")
@@ -298,7 +304,7 @@ def generate_workbook(case_dir: Path) -> Path | None:
 
         for row_idx, row in enumerate(rows, start=1):
             for col_idx, value in enumerate(row, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell = ws.cell(row=row_idx, column=col_idx, value=sanitize_formula(value))
                 val_len = len(str(value))
                 if col_idx <= len(col_widths):
                     col_widths[col_idx - 1] = max(col_widths[col_idx - 1], val_len)

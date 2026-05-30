@@ -1,3 +1,7 @@
+# Copyright (c) 2026 FLINTEK LLC
+# Licensed under the Apache License, Version 2.0.
+# See LICENSE in the project root for license information.
+
 """
 CIRRUS self-update utility.
 
@@ -10,6 +14,7 @@ When run from source, reports that updates should be done via git pull.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import stat
@@ -176,15 +181,72 @@ def apply_update(
         new_exe.unlink(missing_ok=True)
         return False, f"Download failed: {exc}"
 
+    # --- Integrity verification ---
+    # Each release publishes a <asset>.sha256 alongside the binary (see the
+    # build workflow). Fetch it over HTTPS and verify the downloaded bytes
+    # before we replace the running executable. Fail closed on a mismatch;
+    # if no checksum is published (older releases) we proceed but say so.
+    expected = _fetch_expected_sha256(download_url)
+    integrity_note = ""
+    if expected:
+        actual = _sha256_file(new_exe)
+        if actual.lower() != expected.lower():
+            new_exe.unlink(missing_ok=True)
+            return False, (
+                "Integrity check FAILED — the downloaded binary's SHA-256 does not "
+                f"match the published checksum (expected {expected[:12]}…, "
+                f"got {actual[:12]}…). Update aborted; nothing was changed."
+            )
+        integrity_note = " (SHA-256 verified)"
+    else:
+        integrity_note = (
+            " (warning: no published SHA-256 to verify against — "
+            "consider verifying the binary manually)"
+        )
+
     # Make executable on Unix
     if platform.system() != "Windows":
         new_exe.chmod(new_exe.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     # --- Swap ---
     if platform.system() == "Windows":
-        return _swap_windows(current_exe, new_exe)
+        ok, msg = _swap_windows(current_exe, new_exe)
     else:
-        return _swap_unix(current_exe, new_exe)
+        ok, msg = _swap_unix(current_exe, new_exe)
+    return ok, (msg + integrity_note if ok else msg)
+
+
+def _sha256_file(path: Path) -> str:
+    """Return the SHA-256 hex digest of a file, read in chunks."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch_expected_sha256(download_url: str, timeout: int = 30) -> str | None:
+    """
+    Fetch the published checksum for an asset.
+
+    The build workflow uploads ``<asset>.sha256`` next to each binary, in the
+    standard ``sha256sum`` format (``<hex>  <filename>``). Returns the 64-char
+    hex digest, or None if it cannot be fetched or parsed (caller decides what
+    to do when the checksum is unavailable).
+    """
+    try:
+        resp = requests.get(download_url + ".sha256", timeout=timeout)
+        if resp.status_code != 200:
+            return None
+        text = (resp.text or "").strip()
+        if not text:
+            return None
+        token = text.split()[0]
+        if len(token) == 64 and all(c in "0123456789abcdefABCDEF" for c in token):
+            return token
+        return None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

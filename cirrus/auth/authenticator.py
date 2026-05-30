@@ -1,3 +1,7 @@
+# Copyright (c) 2026 FLINTEK LLC
+# Licensed under the Apache License, Version 2.0.
+# See LICENSE in the project root for license information.
+
 """
 MSAL-based authentication for Microsoft Graph API.
 
@@ -9,6 +13,7 @@ App registration override is on the roadmap via --client-id flag.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import msal
@@ -70,8 +75,19 @@ def _load_cache() -> msal.SerializableTokenCache:
 
 def _save_cache(cache: msal.SerializableTokenCache) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # Restrict the cache directory to the owner — it holds refresh tokens and
+    # may live on a shared analyst workstation. chmod is effectively a no-op on
+    # Windows but harmless; POSIX permissions are the case that matters here.
+    try:
+        os.chmod(CACHE_DIR, 0o700)
+    except OSError:
+        pass
     if cache.has_state_changed:
         CACHE_FILE.write_text(cache.serialize())
+        try:
+            os.chmod(CACHE_FILE, 0o600)
+        except OSError:
+            pass
 
 
 def _build_app(tenant_id: str, client_id: str, cache: msal.SerializableTokenCache) -> msal.PublicClientApplication:

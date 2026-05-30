@@ -3,7 +3,7 @@
 
 [![Build](https://github.com/ctrlaltdean/cirrus/actions/workflows/build.yml/badge.svg)](https://github.com/ctrlaltdean/cirrus/actions/workflows/build.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 CIRRUS is a command-line tool for investigating security incidents and auditing compliance in Microsoft 365 and Entra ID (Azure AD) tenants. Designed for MSSP environments — it runs on analyst machines without complex setup, supports multiple tenants, and produces clean output for investigations, reporting, and evidence preservation.
 
@@ -542,6 +542,8 @@ Enriches every public IP address found in a collected case with geolocation, ASN
 |--------|--------------|-----------------|
 | [ip-api.com](https://ip-api.com) | No | Country, city, ASN, org/ISP, datacenter flag, proxy flag, Tor exit flag |
 | [AbuseIPDB](https://www.abuseipdb.com) | Yes (free) | Abuse confidence score (0–100), total abuse reports |
+
+> **Note on ip-api.com transport:** the free ip-api.com endpoint is **HTTP only** (cleartext). Queries and results travel unencrypted and could be observed or tampered with on-path, so treat ip-api results as untrusted hints. If you have an ip-api **Pro** key, set `export IPAPI_KEY=your_key_here` and CIRRUS will use the encrypted HTTPS endpoint instead.
 
 **AbuseIPDB setup (one-time):**
 1. Register for a free account at [abuseipdb.com/register](https://www.abuseipdb.com/register)
@@ -1709,4 +1711,8 @@ Please open an issue before starting large changes.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+`SPDX-License-Identifier: Apache-2.0`
+
+Copyright (c) 2026 FLINTEK LLC.
+
+CIRRUS is licensed under the **Apache License, Version 2.0**. You may obtain a copy of the License at <http://www.apache.org/licenses/LICENSE-2.0>. Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the [LICENSE](LICENSE) file for the full text.

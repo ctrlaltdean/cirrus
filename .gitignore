@@ -66,3 +66,8 @@ htmlcov/
 *.p12
 .env.local
 secrets.json
+
+# Local audit artifacts and scratch files — not for distribution
+AUDIT.md
+_*.txt
+_*.py

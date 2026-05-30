@@ -1,14 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 FLINTEK LLC
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cirrus"
-version = "0.5.0"
+version = "0.6.0"
 description = "Cloud Incident Response & Reconnaissance Utility Suite"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
+authors = [{ name = "FLINTEK LLC" }]
 dependencies = [
     "typer>=0.12",
     "rich>=13",
@@ -23,6 +27,8 @@ dependencies = [
 cirrus = "cirrus.cli:main"
 
 [project.optional-dependencies]
+# Enables `cirrus analyze` custom YAML correlation rules (cirrus/analysis/custom_rules.py)
+yaml = ["PyYAML>=6.0"]
 dev = [
     "pyinstaller>=6.0",
     "pytest>=8.0",

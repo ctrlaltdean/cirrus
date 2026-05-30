@@ -1,3 +1,7 @@
+# Copyright (c) 2026 FLINTEK LLC
+# Licensed under the Apache License, Version 2.0.
+# See LICENSE in the project root for license information.
+
 """
 IP Enrichment Module
 
@@ -30,6 +34,7 @@ analysts should opt in explicitly via `cirrus enrich`.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -148,13 +153,16 @@ def extract_ips_from_case(case_dir: Path) -> set[str]:
 def _enrich_batch_ipapi(
     ips: list[str],
     session: requests.Session,
+    url: str = _IPAPI_BATCH_URL,
+    api_key: str | None = None,
 ) -> dict[str, IPEnrichment]:
     """POST a batch of up to 100 IPs to ip-api.com and parse results."""
     results: dict[str, IPEnrichment] = {}
 
     payload = [{"query": ip, "fields": _IPAPI_FIELDS} for ip in ips]
+    params = {"key": api_key} if api_key else None
     try:
-        resp = session.post(_IPAPI_BATCH_URL, json=payload, timeout=30)
+        resp = session.post(url, json=payload, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
@@ -306,12 +314,26 @@ def enrich_ips_batch(
     ip_list = sorted(ips)
     results: dict[str, IPEnrichment] = {}
 
+    # Use the HTTPS "pro" endpoint when a key is configured; otherwise fall back
+    # to the free HTTP endpoint and warn that the lookup is cleartext.
+    ipapi_key = os.environ.get("IPAPI_KEY") or None
+    if ipapi_key:
+        ipapi_url = _IPAPI_PRO_BATCH_URL
+    else:
+        ipapi_url = _IPAPI_BATCH_URL
+        if on_progress:
+            on_progress(
+                "ip-api.com: using the free HTTP (cleartext) endpoint — queries and "
+                "results are unauthenticated and observable on-path. Set IPAPI_KEY to "
+                "use the HTTPS pro endpoint. Treat ip-api results as untrusted hints."
+            )
+
     # ── Step 1: ip-api.com (batch) ────────────────────────────────────────────
     for i in range(0, len(ip_list), _IPAPI_BATCH_SIZE):
         batch = ip_list[i : i + _IPAPI_BATCH_SIZE]
         if on_progress:
             on_progress(f"ip-api.com: querying {len(batch)} IPs (batch {i // _IPAPI_BATCH_SIZE + 1})")
-        batch_results = _enrich_batch_ipapi(batch, session)
+        batch_results = _enrich_batch_ipapi(batch, session, url=ipapi_url, api_key=ipapi_key)
         results.update(batch_results)
 
     # ── Step 2: AbuseIPDB (optional, throttled) ───────────────────────────────

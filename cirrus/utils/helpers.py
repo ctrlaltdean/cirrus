@@ -1,11 +1,36 @@
+# Copyright (c) 2026 FLINTEK LLC
+# Licensed under the Apache License, Version 2.0.
+# See LICENSE in the project root for license information.
+
 """Shared utility helpers."""
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Networks treated as "internal/infrastructure" — IOC flags are suppressed for
+# these. Covers IPv4 RFC1918, loopback, link-local, and CGNAT, plus the IPv6
+# equivalents (loopback, unique-local, link-local). Documentation/TEST-NET
+# ranges are intentionally NOT included — they are treated as public so they
+# still surface for analyst review.
+_PRIVATE_NETWORKS: tuple[ipaddress._BaseNetwork, ...] = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "100.64.0.0/10",   # CGNAT (RFC 6598)
+        "::1/128",         # IPv6 loopback
+        "fc00::/7",        # IPv6 unique-local
+        "fe80::/10",       # IPv6 link-local
+    )
+)
 
 
 def utc_now() -> str:
@@ -75,15 +100,18 @@ def dt_to_odata(dt: datetime) -> str:
 
 def is_private_ip(ip: str) -> bool:
     """
-    Return True if the IP address is RFC1918, loopback, or link-local.
-    Used by collectors to suppress IOC flags for internal/infrastructure IPs.
+    Return True if the IP address is internal/infrastructure and should not be
+    enriched or IOC-flagged: RFC1918, loopback, link-local, CGNAT, or their
+    IPv6 equivalents (unique-local, link-local, loopback).
+
+    Unparseable or empty values are treated as private (True) so collectors
+    suppress them rather than emit noise. Documentation/TEST-NET ranges are
+    treated as public.
     """
     if not ip:
         return True
-    return (
-        ip.startswith("10.")
-        or ip.startswith("127.")
-        or ip.startswith("169.254.")
-        or ip.startswith("192.168.")
-        or any(ip.startswith(f"172.{i}.") for i in range(16, 32))
-    )
+    try:
+        addr = ipaddress.ip_address(ip.strip())
+    except ValueError:
+        return True
+    return any(addr in net for net in _PRIVATE_NETWORKS)
